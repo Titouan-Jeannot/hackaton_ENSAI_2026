@@ -5,7 +5,7 @@ from sqlalchemy import delete, select, update
 from .access import Ctx, create_once
 from .catalog import reviews
 from .db import Booking, Decision, LoginSession, Meal, Message, Note, Report, Review, Thread, User
-from .domain import ACTIVE, allowed, cancel_meal, found, future, notify, refresh, require
+from .domain import ACTIVE, GROUP_MEMBERS, allowed, cancel_meal, found, future, group_members, notify, refresh, require
 from .forms import OPTIONS, DecisionForm, MessageForm, ReportForm, ThreadForm
 
 class ThreadInfo(BaseModel):
@@ -14,6 +14,8 @@ class ThreadInfo(BaseModel):
     title: str
     other: str
     readonly: bool
+    group: bool = False
+    members: list[str] = []
 
 
 class MessageInfo(BaseModel):
@@ -22,6 +24,7 @@ class MessageInfo(BaseModel):
     mine: bool
     body: str
     created: float
+    system: bool = False
 
 
 class Messages(ThreadInfo):
@@ -68,17 +71,27 @@ class ReportDetail(ReportInfo):
 router = APIRouter()
 
 
+def members(c, t):
+    m = c.s.get(Meal, t.meal)
+    return group_members(c.s, m) if t.kind == "group" else [m.host, t.guest]
+
+
 def thread_view(c, t):
     m = c.s.get(Meal, t.meal)
+    title = "Annonce masquée" if m.hidden else m.title
+    if t.kind == "group":
+        names = [c.s.get(User, uid).name for uid in members(c, t)]
+        return dict(id=t.id, meal=m.id, title=title, other="Chat du repas", readonly=m.status == "CANCELLED",
+                    group=True, members=names)
     other = c.s.get(User, t.guest if c.user.id == m.host else m.host)
-    return dict(id=t.id, meal=m.id, title="Annonce masquée" if m.hidden else m.title, other=other.name,
+    return dict(id=t.id, meal=m.id, title=title, other=other.name,
                 readonly=m.status == "CANCELLED" or other.suspended)
 
 
 def access_thread(c, tid):
     uid = c.member().id
     t = found(c.s.get(Thread, tid))
-    return found(t if uid in (t.guest, c.s.get(Meal, t.meal).host) else None)
+    return found(t if uid in members(c, t) else None)
 
 
 @router.post("/conversations", response_model=ThreadInfo)
@@ -86,7 +99,7 @@ def create_thread(data: ThreadForm, c: Ctx):
     uid = c.member().id
     m = found(c.s.get(Meal, data.meal))
     allowed(uid != m.host)
-    t = c.s.scalar(select(Thread).where(Thread.guest == uid, Thread.meal == m.id))
+    t = c.s.scalar(select(Thread).where(Thread.guest == uid, Thread.meal == m.id, Thread.kind == "private"))
     if not t:
         future(m, c.now)
         t = Thread(guest=uid, meal=m.id)
@@ -98,15 +111,18 @@ def create_thread(data: ThreadForm, c: Ctx):
 @router.get("/conversations/me", response_model=list[ThreadInfo])
 def threads(c: Ctx):
     uid = c.member().id
+    joined = select(Booking.meal).where(Booking.guest == uid, Booking.status.in_(GROUP_MEMBERS))
+    mine = (Thread.kind == "private") & ((Thread.guest == uid) | (Meal.host == uid))
+    group = (Thread.kind == "group") & ((Meal.host == uid) | Thread.meal.in_(joined))
     return [thread_view(c, t) for t in c.s.scalars(select(Thread).join(Meal, Thread.meal == Meal.id)
-            .where((Thread.guest == uid) | (Meal.host == uid)).order_by(Thread.id.desc()))]
+            .where(mine | group).order_by(Thread.id.desc()))]
 
 
 @router.get("/conversations/{tid}/messages", response_model=Messages)
 def messages(tid: int, c: Ctx):
     t = access_thread(c, tid)
     return {**thread_view(c, t), "messages": [dict(id=m.id, author=c.s.get(User, m.author).name, mine=m.author == c.user.id,
-            body=m.body, created=m.created) for m in c.s.scalars(select(Message).where(Message.thread == tid,
+            body=m.body, created=m.created, system=bool(m.system)) for m in c.s.scalars(select(Message).where(Message.thread == tid,
             Message.hidden.is_(False)).order_by(Message.id))]}
 
 
@@ -125,8 +141,10 @@ def send(tid: int, data: MessageForm, c: Ctx):
         m = Message(thread=tid, author=c.user.id, body=data.body, created=c.now)
         c.s.add(m)
         c.s.flush()
-        host = c.s.get(Meal, t.meal).host
-        notify(c.s, t.guest if host == c.user.id else host, f"msg-{m.id}", "Vous avez reçu un message.", f"#thread/{tid}", c.now)
+        label = "Nouveau message dans le chat du repas." if t.kind == "group" else "Vous avez reçu un message."
+        for uid in members(c, t):
+            if uid != c.user.id:
+                notify(c.s, uid, f"msg-{m.id}", label, f"#thread/{tid}", c.now)
         return m.id
 
     return {"id": create_once(c, f"thread/{tid}", data, create)}

@@ -10,11 +10,15 @@ from playwright.sync_api import expect, sync_playwright
 
 from blablacook.app import create_app
 from blablacook.demo import DEMO_PASSWORD, seed
+from blablacook.mailer import ConsoleMailer
 
 
 @pytest.fixture
-def live(tmp_path):
-    app = create_app(tmp_path/"navigateur.sqlite3")
+def live(tmp_path, monkeypatch):
+    # Sans clés externes : la carte et l’autocomplétion affichent leurs replis, aucun appel réseau.
+    monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
+    monkeypatch.setenv("BLABLACOOK_IMAGE_SEARCH", "off")
+    app = create_app(tmp_path/"navigateur.sqlite3", mailer=ConsoleMailer(echo=False))
     seed(app.state.engine, time.time())
     with socket.socket() as sock:
         sock.bind(("127.0.0.1",0))
@@ -73,7 +77,7 @@ def test_parcours_chrome(live):
         assert len(cards)>=3
         assert guest.evaluate("document.documentElement.scrollWidth <= innerWidth")
         guest.get_by_role("button",name="Carte",exact=True).click()
-        expect(guest.locator(".map")).to_be_visible()
+        expect(guest.locator(".gmap")).to_be_visible()
         assert set(cards)=={s.split(" · ")[0] for s in guest.locator(".maplist a").all_text_contents()}
         guest.locator(".filter-area summary").click()
         guest.get_by_label("Activité",exact=True).select_option("Jeux de société")
@@ -88,10 +92,12 @@ def test_parcours_chrome(live):
         host.get_by_label("Ingrédients",exact=True).fill("Potiron, crème")
         host.get_by_label("Lait",exact=True).check()
         host.get_by_label("Début",exact=True).fill("2090-11-23T20:00")
-        host.get_by_label("Contrôle du minimum").fill("2090-11-23T15:00")
-        host.get_by_label("Secteur public").select_option("Centre")
-        address="22 rue Imaginaire de la Recette"
-        host.get_by_label("Adresse exacte").fill(address)
+        host.get_by_label("Date limite pour atteindre le minimum d’invités").fill("2090-11-23T15:00")
+        address="22 rue Imaginaire de la Recette, Rennes"
+        host.get_by_label("Adresse du repas (privée)").fill(address)
+        # Sans clé Google Maps, on simule la sélection d’une suggestion d’autocomplétion.
+        host.evaluate("""() => {const f=document.querySelector('form[data-form=publish]');
+            f.elements.lat.value='48.1113'; f.elements.lng.value='-1.68'; f.elements.city.value='Rennes';}""")
         host.get_by_role("button",name="Publier le repas").click()
         expect(host.get_by_role("heading",name="La table de la recette")).to_be_visible()
         meal_url=host.url
@@ -111,7 +117,10 @@ def test_parcours_chrome(live):
         host.get_by_role("article").filter(has_text="La table de la recette").get_by_role("button",name="Accepter").click()
         expect(host.get_by_role("article").filter(has_text="La table de la recette").get_by_text("Réservation confirmée")).to_be_visible()
         guest.reload()
-        expect(guest.get_by_text(address,exact=True)).to_be_visible()
+        # L’adresse n’est dévoilée qu’une heure avant le repas ; le chat de groupe est ouvert.
+        expect(guest.get_by_text("une heure avant le repas",exact=False)).to_be_visible()
+        expect(guest.get_by_text(address)).to_have_count(0)
+        expect(guest.get_by_role("link",name="Ouvrir le chat du repas")).to_be_visible()
         guest.get_by_role("link",name="Mes réservations",exact=True).last.click()
         guest.get_by_role("article").filter(has_text="La table de la recette").get_by_role("button",name="Annuler ma réservation").click()
         guest.get_by_role("button",name="Confirmer l’annulation").click()

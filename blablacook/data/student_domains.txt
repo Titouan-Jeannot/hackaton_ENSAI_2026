@@ -1,0 +1,50 @@
+# Domaines d'adresses étudiantes acceptés à l'inscription (un par ligne).
+# Un domaine accepte aussi ses sous-domaines : « univ-rennes.fr » accepte « etudiant.univ-rennes.fr ».
+# Liste indicative à compléter et à vérifier avec chaque établissement.
+# Des domaines supplémentaires peuvent être ajoutés sans toucher au code via BLABLACOOK_DOMAINS dans .env.
+
+# Rennes et Bretagne
+ensai.fr
+univ-rennes.fr
+univ-rennes1.fr
+univ-rennes2.fr
+insa-rennes.fr
+ens-rennes.fr
+sciencespo-rennes.fr
+agrocampus-ouest.fr
+institut-agro.fr
+ehesp.fr
+imt-atlantique.net
+imt-atlantique.fr
+univ-ubs.fr
+univ-brest.fr
+
+# Grandes écoles et universités (France)
+ensae.fr
+ensai.eu
+centralesupelec.fr
+student-cs.fr
+polytechnique.edu
+ens.psl.eu
+psl.eu
+dauphine.eu
+sciencespo.fr
+hec.edu
+essec.edu
+sorbonne-universite.fr
+u-paris.fr
+univ-paris1.fr
+universite-paris-saclay.fr
+univ-lyon1.fr
+univ-lyon2.fr
+univ-lille.fr
+u-bordeaux.fr
+univ-nantes.fr
+univ-amu.fr
+unistra.fr
+univ-grenoble-alpes.fr
+univ-tlse3.fr
+ut-capitole.fr
+umontpellier.fr
+univ-cotedazur.fr
+univ-lorraine.fr

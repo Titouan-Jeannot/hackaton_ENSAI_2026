@@ -1,7 +1,8 @@
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 
-from .db import Address, Booking, Meal, MealCancellation, Note, Review, User
+from .db import Address, Booking, Meal, MealCancellation, Message, Note, Review, Thread, User
+from .geo import AREA_RADIUS, approximate_area
 
 ACTIVE = ("PENDING", "ACCEPTED")
 HOUR = 3600
@@ -82,14 +83,17 @@ def future(meal, now):
     require(meal.status == "OPEN" and not meal.hidden and now < meal.start, 409, "MEAL_CLOSED", "Ce repas est fermé aux demandes.")
 
 
-def publish(s, user, data, now):
+def publish(s, user, data, now, credit=("", "")):
     require(data.start.timestamp() > now, 422, "INVALID_DATE", "Choisissez un début dans le futur.")
     allowed(not data.women or user.gender == "Femme")
-    meal = Meal(host=user.id, **data.model_dump(exclude={"start", "check_at", "address"}),
-                start=data.start.timestamp(), check_at=data.check_at.timestamp())
+    area_lat, area_lng = approximate_area(data.lat, data.lng)
+    meal = Meal(host=user.id, **data.model_dump(exclude={"start", "check_at", "address", "lat", "lng"}),
+                start=data.start.timestamp(), check_at=data.check_at.timestamp(),
+                area_lat=area_lat, area_lng=area_lng, area_radius=AREA_RADIUS,
+                image_credit=credit[0], image_credit_url=credit[1])
     s.add(meal)
     s.flush()
-    s.add(Address(meal=meal.id, address=data.address))
+    s.add(Address(meal=meal.id, address=data.address, lat=data.lat, lng=data.lng))
     refresh(s, meal, now)
     return meal
 
@@ -105,6 +109,42 @@ def request_place(s, meal, guest, now):
     s.flush()
     notify(s, meal.host, f"request-{b.id}", "Une nouvelle demande de place est arrivée.", "#host", now)
     return b
+
+
+# Membres du chat de groupe. Après une annulation par l’hôte, le fil reste lisible (en lecture seule).
+GROUP_MEMBERS = ("ACCEPTED", "ATTENDED", "CANCELLED_BY_HOST")
+
+
+def group_chat(s, meal, create=False):
+    t = s.scalar(select(Thread).where(Thread.meal == meal.id, Thread.kind == "group"))
+    if t is None and create:
+        t = Thread(meal=meal.id, kind="group")
+        s.add(t)
+        s.flush()
+    return t
+
+
+def group_members(s, meal):
+    """Hôte + invités dont la réservation est acceptée (ou la présence confirmée)."""
+    return [meal.host, *(b.guest for b in reservations(s, meal, *GROUP_MEMBERS))]
+
+
+def system_message(s, thread, user, body, now):
+    s.add(Message(thread=thread.id, author=user, body=body, created=now, system=True))
+
+
+def join_group_chat(s, meal, guest, now):
+    t = group_chat(s, meal, create=True)
+    name = s.get(User, guest).name
+    system_message(s, t, guest, f"{name} a rejoint la table.", now)
+    notify(s, guest, f"group-join-{meal.id}-{guest}-{int(now)}", f"Tu as été ajouté·e au chat du repas « {meal.title} ».",
+           f"#thread/{t.id}", now)
+
+
+def leave_group_chat(s, meal, guest, now):
+    t = group_chat(s, meal)
+    if t:
+        system_message(s, t, guest, f"{s.get(User, guest).name} a quitté la table.", now)
 
 
 def penalty(s, booking, reason):
@@ -124,12 +164,16 @@ def transition(s, b, actor, action, now):
         state = "ACCEPTED" if action == "accept" else "REJECTED"
         label = "Votre réservation est confirmée." if action == "accept" else "Votre demande a été refusée."
         notify(s, b.guest, f"{action}-{b.id}", label, "#bookings", now)
+        if action == "accept":
+            join_group_chat(s, m, b.guest, now)
     elif action == "cancel":
         future(m, now)
         require(b.status in ACTIVE)
         state = "WITHDRAWN" if b.status == "PENDING" else "CANCELLED_BY_GUEST"
-        if state == "CANCELLED_BY_GUEST" and m.start - now < CANCELLATION_LIMIT:
-            penalty(s, b, "Annulation tardive")
+        if state == "CANCELLED_BY_GUEST":
+            leave_group_chat(s, m, b.guest, now)
+            if m.start - now < CANCELLATION_LIMIT:
+                penalty(s, b, "Annulation tardive")
         notify(s, m.host, f"cancel-{b.id}", "Un invité a annulé sa participation.", "#host", now)
     else:
         require(m.status == "OPEN" and now >= end(m) and b.status == "ACCEPTED")

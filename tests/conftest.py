@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from blablacook.app import create_app
 from blablacook.db import User, transaction
+from blablacook.mailer import ConsoleMailer
 
 
 class Clock:
@@ -19,9 +21,15 @@ def iso(t):
     return datetime.fromtimestamp(t, UTC).isoformat()
 
 
+def last_mail(app, email):
+    """Dernier mail envoyé à cette adresse : (code à 6 chiffres, jeton du lien)."""
+    mail = next(m for m in reversed(app.state.mailer.outbox) if m["to"] == email.strip().lower())
+    return re.search(r"\b(\d{6})\b", mail["text"]).group(1), re.search(r"#verify/([\w-]+)", mail["text"]).group(1)
+
+
 def offer(clock, **updates):
     data = dict(title="Table de test", menu="Soupe", ingredients="Pois et crème", allergens=["Lait"],
-                sector="Centre", address="55 rue Privée fictive", start=iso(clock.now+10*3600),
+                lat=48.1113, lng=-1.6800, city="Rennes", address="55 rue Privée fictive, Rennes", start=iso(clock.now+10*3600),
                 check_at=iso(clock.now+3600), minimum=1, maximum=2)
     return data | updates
 
@@ -30,7 +38,7 @@ def offer(clock, **updates):
 def world(tmp_path):
     clock = Clock()
     path = tmp_path / "recette.sqlite3"
-    app = create_app(path, clock)
+    app = create_app(path, clock, mailer=ConsoleMailer(echo=False), photo_search=False)
     clients = []
 
     def client():
@@ -44,7 +52,8 @@ def world(tmp_path):
         assert r.status_code == 201, r.text
         d = r.json()
         c.headers["X-CSRF-Token"] = d["csrf"]
-        assert c.post("/api/auth/verify-email", json={"token":d["demo_verification"]}).is_success
+        code, _ = last_mail(app, name+"@campus.test")
+        assert c.post("/api/auth/verify-code", json={"code": code}).is_success
         assert c.patch("/api/users/me", json={"gender":gender}).is_success
         if admin:
             with transaction(app.state.engine) as s:

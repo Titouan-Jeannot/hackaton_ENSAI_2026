@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from sqlalchemy import (Boolean, CheckConstraint, Column, Float, ForeignKey, Index, Integer,
-                        JSON, String, UniqueConstraint, create_engine, event, text)
+                        JSON, String, UniqueConstraint, create_engine, event, inspect, text)
 from sqlalchemy.orm import DeclarativeBase, Session
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,11 +40,17 @@ class User(Base):
     allergies = Column(String, default="")
     age = Column(Integer)
     gender = Column(String, default="")
+    home_address = Column(String, default="")       # adresse privée, sert aux suggestions proches
+    home_lat = Column(Float)
+    home_lng = Column(Float)
     verified = Column(Boolean, default=False)
     suspended = Column(Boolean, default=False)
     admin = Column(Boolean, default=False)
-    verification = Column(String)
+    verification = Column(String)          # empreinte sha256 du jeton du lien
+    verification_code = Column(String)     # empreinte sha256 du code à 6 chiffres
     verification_until = Column(Float)
+    verification_sent = Column(Float)
+    verification_attempts = Column(Integer, default=0)
 
 
 class LoginSession(Base):
@@ -71,7 +77,12 @@ class Meal(Base):
     kind = Column(String, nullable=False)
     activity = Column(String, nullable=False)
     image = Column(String, nullable=False)
-    sector = Column(String, nullable=False)
+    image_credit = Column(String, default="")       # auteur et licence de la photo (photos Openverse)
+    image_credit_url = Column(String, default="")
+    city = Column(String, default="")              # localité publique (ex. « Rennes »)
+    area_lat = Column(Float, nullable=False)        # centre PUBLIC du cercle, décalé du lieu exact
+    area_lng = Column(Float, nullable=False)
+    area_radius = Column(Integer, nullable=False)   # rayon du cercle public, en mètres
     start = Column(Float, nullable=False, index=True)
     duration = Column(Integer)
     check_at = Column(Float, nullable=False)
@@ -108,6 +119,8 @@ class Address(Base):
     __tablename__ = "addresses"
     meal = ref("meals.id", primary_key=True)
     address = Column(String, nullable=False)
+    lat = Column(Float, nullable=False)             # position exacte, jamais publique
+    lng = Column(Float, nullable=False)
 
 
 class Booking(Base):
@@ -141,11 +154,15 @@ class Review(Base):
 
 
 class Thread(Base):
+    """Fil privé (un invité ↔ l’hôte, avant réservation) ou chat de groupe du repas (hôte + invités acceptés)."""
     __tablename__ = "threads"
     id = pk()
     meal = ref("meals.id")
-    guest = ref("users.id")
-    __table_args__ = (UniqueConstraint("meal", "guest"),)
+    guest = Column(Integer, ForeignKey("users.id"))  # NULL pour le chat de groupe
+    kind = Column(String, nullable=False, default="private")  # private | group
+    __table_args__ = (UniqueConstraint("meal", "guest"),
+                      Index("one_group_chat", "meal", unique=True, sqlite_where=text("kind = 'group'")),
+                      CheckConstraint("(kind = 'group') = (guest IS NULL)"))
 
 
 class Message(Base):
@@ -156,6 +173,7 @@ class Message(Base):
     body = Column(String, nullable=False)
     created = Column(Float, nullable=False)
     hidden = Column(Boolean, default=False)
+    system = Column(Boolean, default=False)  # message automatique (arrivée ou départ d’un participant)
 
 
 class Note(Base):
@@ -202,7 +220,24 @@ def database(path):
         connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(engine)
+    check_schema(engine, path)
     return engine
+
+
+class OutdatedSchema(RuntimeError):
+    pass
+
+
+def check_schema(engine, path):
+    """Pas d’outil de migration : on refuse clairement une base créée avec une ancienne version du schéma."""
+    found = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        missing = {c.name for c in table.columns} - {c["name"] for c in found.get_columns(table.name)}
+        if missing:
+            engine.dispose()
+            raise OutdatedSchema(f"La base {path} date d’une ancienne version (colonnes manquantes dans "
+                                 f"« {table.name} » : {', '.join(sorted(missing))}). Supprimez ce fichier : "
+                                 "il sera recréé et repeuplé au prochain démarrage.")
 
 
 def transaction(engine):

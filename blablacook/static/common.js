@@ -21,7 +21,8 @@ const paths = {
 function icon(name){return `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24">${paths[name]||""}</svg>`;}
 function esc(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function dt(ts){return new Intl.DateTimeFormat("fr-FR",{weekday:"short",day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}).format(ts*1000);}
-function mealPhoto(image){return image.startsWith("data:image/jpeg;base64,")?image:"/static/images/"+image+".webp";}
+function mealPhoto(image){return image.startsWith("data:image/jpeg;base64,")?image:"static/images/"+image+".webp";}
+function photoCredit(m){return m.image_credit?`<small class="credit">Photo : <a href="${esc(m.image_credit_url)}" target="_blank" rel="noopener noreferrer">${esc(m.image_credit)}</a> (via Openverse)</small>`:"";}
 function avatar(u){if(u.photo?.startsWith("data:image/jpeg;base64,"))return `<img class="avatar" src="${esc(u.photo)}" alt="">`;return `<span class="avatar ${esc(u.photo)}" aria-hidden="true">${esc(u.name.slice(0,1))}</span>`;}
 function badge(s){return `<span class="badge">${esc(s)}</span>`;}
 function empty(s){return `<p class="empty">${esc(s)}</p>`;}
@@ -41,7 +42,7 @@ async function api(path,method="GET",body,key){
   if(key)headers["Idempotency-Key"]=key;
   if(body!==undefined)headers["Content-Type"]="application/json";
   if(method!=="GET"&&auth.csrf)headers["X-CSRF-Token"]=auth.csrf;
-  const res=await fetch("/api"+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),cache:"no-store"});
+  const res=await fetch("api"+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),cache:"no-store"});
   const data=await res.json();
   if(!res.ok){
     if(res.status===401&&data.code==="SESSION_REQUIRED"&&auth.user){auth={user:null};sessionStorage.setItem("return",location.hash);location.hash="login";message("Votre session a expiré. Reconnectez-vous.");}
@@ -55,7 +56,7 @@ function showNav(){
   const link=(r,t,cl="")=>a(r,t,`${cl} ${route===r?"current":""}`);
   nav.innerHTML=link("catalogue","Les tables","optional")+link("publish","Proposer un repas",u?.verified?"button":"optional")+
     (!u?link("login","Se connecter","button"):`<details><summary>${esc(u.name)}</summary><div class="menu">${
-    u.verified?[["host","Mes repas"],["bookings","Mes réservations"],["messages","Messages"],["notes","Notifications"],["account","Mon profil"],...(u.admin?[["admin","Administration"]]:[])].map(([r,t])=>link(r,t)).join(""):link("verify","Vérifier mon compte")
+    u.verified?[["host","Mes repas"],["bookings","Mes réservations"],["messages","Messages"],["notes","Notifications"],["account","Mon profil"],...(u.admin?[["admin","Administration"]]:[])].map(([r,t])=>link(r,t)).join(""):link("account","Mon profil")+link("verify","Vérifier mon compte")
     }${action("Se déconnecter","logout","","plain")}</div></details>`);
 }
 function openDialog(html){document.querySelector("#dialog-body").innerHTML=html;dialog.showModal();}

@@ -10,18 +10,26 @@ from fastapi.templating import Jinja2Templates
 
 from . import catalog, community
 from .db import DEMO_DB, database
+from .domains import load_domains
+from .imagesearch import search_from_env
+from .mailer import mailer_from_env
 from .domain import Problem
 
 PACKAGE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE / "templates"))
 
 
-def create_app(path=DEMO_DB, clock=time.time, demo=True):
+def create_app(path=DEMO_DB, clock=time.time, demo=True, mailer=None, photo_search=None):
     app = FastAPI(title="BlablaCook", version="1.0", docs_url=None, redoc_url=None)
     app.state.engine = database(path)
     app.state.clock = clock
     app.state.demo = demo
-    app.state.domains = {d.strip().lower() for d in os.getenv("BLABLACOOK_DOMAINS", "campus.test,etudiants.test").split(",") if d.strip()}
+    app.state.domains = load_domains()
+    app.state.mailer = mailer or mailer_from_env()
+    # Clé navigateur Google Maps : elle est publique par nature, la restreindre au domaine dans la console Google.
+    app.state.maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+    # photo_search=False désactive la recherche (tests hors ligne) ; None = configuration de l’environnement.
+    app.state.photo_search = search_from_env() if photo_search is None else (photo_search or None)
     app.include_router(catalog.router, prefix="/api")
     app.include_router(community.router, prefix="/api")
     app.mount("/static", StaticFiles(directory=str(PACKAGE / "static")), name="static")

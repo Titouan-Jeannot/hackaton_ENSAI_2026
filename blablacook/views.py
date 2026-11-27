@@ -2,7 +2,9 @@ from sqlalchemy import func, select
 from pydantic import BaseModel
 
 from .db import Address, Booking, Meal, Review, User
-from .domain import ACTIVE, CANCELLATION_LIMIT, DEFAULT_DURATION, REVIEW_WINDOW, average, end, reservations
+from .domain import (ACTIVE, CANCELLATION_LIMIT, DEFAULT_DURATION, GROUP_MEMBERS, REVIEW_WINDOW, average, end,
+                     group_chat, reservations)
+from .geo import ADDRESS_REVEAL
 
 
 class PublicProfile(BaseModel):
@@ -11,6 +13,17 @@ class PublicProfile(BaseModel):
     bio: str
     photo: str
     host_average: float | None
+
+
+class Area(BaseModel):
+    lat: float
+    lng: float
+    radius: int
+
+
+class Point(BaseModel):
+    lat: float
+    lng: float
 
 
 class MealCard(BaseModel):
@@ -27,7 +40,10 @@ class MealCard(BaseModel):
     kind: str
     activity: str
     image: str
-    sector: str
+    image_credit: str
+    image_credit_url: str
+    city: str
+    area: Area
     start: float
     end: float
     duration: int | None
@@ -45,11 +61,13 @@ def profile(s, u):
 
 def meal_card(s, m):
     fields = ("id", "title", "description", "menu", "ingredients", "allergens", "uncertain", "diets", "languages",
-              "mood", "kind", "activity", "image", "sector", "start", "duration", "minimum", "maximum", "women", "status")
-    card = {**{k: getattr(m, k) for k in fields}, "end": end(m), "host": profile(s, s.get(User, m.host)),
+              "mood", "kind", "activity", "image", "image_credit", "image_credit_url", "city", "start", "duration", "minimum", "maximum", "women", "status")
+    card = {**{k: getattr(m, k) for k in fields}, "end": end(m),
+            "area": {"lat": m.area_lat, "lng": m.area_lng, "radius": m.area_radius}, "host": profile(s, s.get(User, m.host)),
             "available": m.maximum - len(reservations(s, m, "ACCEPTED"))}
     if m.hidden:
-        card.update(title="Annonce masquée", description="", menu="", ingredients="", image="table")
+        card.update(title="Annonce masquée", description="", menu="", ingredients="", image="table",
+                    image_credit="", image_credit_url="")
     return card
 
 
@@ -88,9 +106,16 @@ def private_meal(c, m):
                 can_message=not is_host and not m.hidden and m.status == "OPEN" and c.now < m.start,
                 can_cancel=is_host and m.status == "OPEN" and not any(b.status in ("ATTENDED", "NO_SHOW") for b in bookings))
     if is_host or confirmed:
-        data["address"] = s.get(Address, m.id).address
+        # L’hôte voit toujours l’adresse ; l’invité accepté la découvre une heure avant le début.
+        data["address_at"] = m.start - ADDRESS_REVEAL
+        if is_host or c.now >= data["address_at"]:
+            place = s.get(Address, m.id)
+            data["address"], data["location"] = place.address, {"lat": place.lat, "lng": place.lng}
         guests = [s.get(User, b.guest) for b in bookings if b.status == "ACCEPTED"]
         data["guests"] = [profile(s, u) for u in guests if is_host or not u.hidden_guest or uid == u.id]
+    if is_host or (own is not None and own.status in GROUP_MEMBERS):
+        chat = group_chat(s, m)
+        data["group_thread"] = chat.id if chat else None
     if is_host:
         data.update(warning=m.threshold_warning, check_at=m.check_at)
     return data
@@ -99,14 +124,16 @@ def private_meal(c, m):
 class SessionUser(BaseModel):
     id: int
     name: str
+    email: str
     verified: bool
     admin: bool
+    home_lat: float | None = None
+    home_lng: float | None = None
 
 
 class SessionInfo(BaseModel):
     user: SessionUser | None
     csrf: str | None = None
-    demo_verification: str | None = None
 
 
 class ReviewInfo(BaseModel):
@@ -150,6 +177,9 @@ class PersonalMeal(BaseModel):
     can_cancel: bool
     can_message: bool
     address: str | None = None
+    address_at: float | None = None
+    location: Point | None = None
     guests: list[PublicProfile] | None = None
+    group_thread: int | None = None
     warning: bool | None = None
     check_at: float | None = None

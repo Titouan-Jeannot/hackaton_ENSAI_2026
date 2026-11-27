@@ -1,5 +1,7 @@
 # BlablaCook
 
+Lire d'abord `PROJECT_CONTEXT.md` (architecture, schéma, décisions, journal) et le mettre à jour après chaque modification importante.
+
 La référence métier est `BlablaCook_Prompt_Codex.md`. Le guide de démo et les conventions se trouvent dans `README.md`.
 
 - Installer avec `python3 -m venv .venv` puis `.venv/bin/python -m pip install -r requirements.txt`.

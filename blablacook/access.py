@@ -1,4 +1,5 @@
 import hashlib
+import os
 import hmac
 import secrets
 from typing import Annotated
@@ -8,6 +9,7 @@ from sqlalchemy import select
 
 from .db import LoginSession, User, WriteReceipt, transaction
 from .domain import allowed, maintain, require
+from .mailer import verification_mail
 
 SESSION_LIFE = 14 * 86400
 
@@ -75,12 +77,32 @@ def session_info(c):
     if not c.user:
         return {"user": None}
     u = c.user
-    info = {"user": {"id": u.id, "name": u.name, "verified": u.verified, "admin": u.admin}, "csrf": c.login.csrf}
-    if not u.verified and c.request.app.state.demo:
-        if not u.verification or c.now >= u.verification_until:
-            u.verification, u.verification_until = secrets.token_urlsafe(24), c.now + 900
-        info["demo_verification"] = u.verification
-    return info
+    return {"user": {"id": u.id, "name": u.name, "email": u.email, "verified": u.verified, "admin": u.admin,
+                     "home_lat": u.home_lat, "home_lng": u.home_lng},
+            "csrf": c.login.csrf}
+
+
+VERIFICATION_LIFE = 24 * 3600
+RESEND_DELAY = 60
+MAX_CODE_ATTEMPTS = 5
+
+
+def issue_verification(c, user, tasks):
+    """Crée un nouveau lien et un nouveau code, puis programme l'envoi du mail après la réponse.
+
+    Seules les empreintes sont stockées : une fuite de la base ne permet pas de valider un compte.
+    """
+    token, code = secrets.token_urlsafe(32), f"{secrets.randbelow(10**6):06d}"
+    user.verification, user.verification_code = digest(token), digest(f"{user.id}:{code}")
+    user.verification_until, user.verification_sent, user.verification_attempts = c.now + VERIFICATION_LIFE, c.now, 0
+    base = os.getenv("BLABLACOOK_BASE_URL") or str(c.request.base_url)
+    link = base.rstrip("/") + "/#verify/" + token
+    subject, text, html = verification_mail(user.name, code, link)
+    tasks.add_task(c.request.app.state.mailer.send, user.email, subject, text, html)
+
+
+def code_matches(user, code):
+    return hmac.compare_digest(digest(f"{user.id}:{code}"), user.verification_code or "")
 
 
 def create_once(c, resource, data, create):

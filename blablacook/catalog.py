@@ -1,20 +1,26 @@
 import hmac
-import math
-import re
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Query, Request, Response
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from .access import Ctx, create_once, password_hash, session_info, start_session
-from .db import Booking, Meal, Review, User
-from .domain import (allowed, average, cancel_meal, found, publish, request_place,
+from .access import (MAX_CODE_ATTEMPTS, RESEND_DELAY, Ctx, code_matches, create_once, digest, issue_verification,
+                     password_hash, session_info, start_session)
+from .db import Booking, LoginSession, Meal, Review, User
+from .imagesearch import DEFAULT_IMAGE, PHOTO_TOKEN
+from .domains import student_email
+from .geo import distance_km
+from .domain import (ACTIVE, Problem, allowed, average, cancel_meal, found, publish, request_place,
                      require, reservations, review, transition)
-from .forms import (OPTIONS, SECTORS, Attendance, Login, MealForm, Profile, Registration, ReviewForm, Verification)
+from .forms import (OPTIONS, Attendance, Login, MealForm, Profile, Registration, ReviewForm, Verification,
+                    VerificationCode)
 from .views import BookingInfo, PersonalMeal, ReviewInfo, ReviewsInfo, SessionInfo, MealCard, PublicProfile, booking_info, meal_card, private_meal, profile, review_info
 
 class PersonalProfile(Profile):
     id: int
     email: str
+    verified: bool
     guest_average: float | None
 
 
@@ -27,25 +33,57 @@ def session(c: Ctx):
 
 
 @router.post("/auth/register", response_model=SessionInfo, response_model_exclude_unset=True, status_code=201)
-def register(data: Registration, response: Response, c: Ctx):
+def register(data: Registration, response: Response, tasks: BackgroundTasks, c: Ctx):
     email = data.email.strip().lower()
-    require(c.request.app.state.demo, 403, "DEMO_ONLY", "La vérification locale est désactivée.")
-    require(re.fullmatch(r"[^@\s]+@[^@\s]+", email) and email.rsplit("@", 1)[1] in c.request.app.state.domains,
-            422, "UNKNOWN_DOMAIN", "Utilisez une adresse d’un campus reconnu.")
+    require(student_email(email, c.request.app.state.domains), 422, "UNKNOWN_DOMAIN",
+            "Utilise ton adresse mail étudiante (université ou école reconnue).")
     require(not c.s.scalar(select(User.id).where(User.email == email)), 409, "EMAIL_EXISTS", "Cette adresse est déjà inscrite.")
     u = User(name=data.name, email=email, password=password_hash(data.password))
     c.s.add(u)
     c.s.flush()
+    issue_verification(c, u, tasks)
     return start_session(c, u, response)
+
+
+def activate(c, u):
+    u.verified = True
+    u.verification = u.verification_code = u.verification_until = None
+    u.verification_attempts = 0
 
 
 @router.post("/auth/verify-email", response_model=SessionInfo, response_model_exclude_unset=True)
 def verify(data: Verification, c: Ctx):
-    u = c.member(False)
-    require(c.request.app.state.demo and not u.verified and u.verification and c.now < u.verification_until
-            and hmac.compare_digest(data.token.encode(), u.verification.encode()), 403, "INVALID_TOKEN", "Le lien de vérification a expiré.")
-    u.verified, u.verification, u.verification_until = True, None, None
+    """Lien reçu par mail : fonctionne aussi depuis un navigateur où l’on n’est pas connecté."""
+    u = c.s.scalar(select(User).where(User.verification == digest(data.token), User.verified.is_(False)))
+    require(u and c.now < u.verification_until, 403, "INVALID_TOKEN", "Ce lien de vérification est invalide ou a expiré.")
+    activate(c, u)
     return session_info(c)
+
+
+@router.post("/auth/verify-code", response_model=SessionInfo, response_model_exclude_unset=True)
+def verify_code(data: VerificationCode, c: Ctx):
+    u = c.member(False)
+    require(not u.verified, 409, "ALREADY_VERIFIED", "Ton adresse est déjà vérifiée.")
+    require(u.verification_code and c.now < u.verification_until, 403, "INVALID_TOKEN", "Ce code a expiré. Demande un nouveau mail.")
+    require((u.verification_attempts or 0) < MAX_CODE_ATTEMPTS, 429, "TOO_MANY_ATTEMPTS",
+            "Trop d’essais. Demande un nouveau mail de confirmation.")
+    if not code_matches(u, data.code):
+        u.verification_attempts = (u.verification_attempts or 0) + 1
+        # On valide la transaction pour conserver le compteur d’essais malgré l’erreur.
+        c.s.commit()
+        raise Problem(403, "INVALID_TOKEN", "Code incorrect.")
+    activate(c, u)
+    return session_info(c)
+
+
+@router.post("/auth/resend-verification")
+def resend(tasks: BackgroundTasks, c: Ctx):
+    u = c.member(False)
+    require(not u.verified, 409, "ALREADY_VERIFIED", "Ton adresse est déjà vérifiée.")
+    wait = (u.verification_sent or 0) + RESEND_DELAY - c.now
+    require(wait <= 0, 429, "RESEND_TOO_SOON", f"Patiente {int(wait) + 1} s avant de redemander un mail.")
+    issue_verification(c, u, tasks)
+    return {"sent": True}
 
 
 @router.post("/auth/login", response_model=SessionInfo, response_model_exclude_unset=True)
@@ -66,13 +104,16 @@ def logout(response: Response, c: Ctx):
 
 @router.get("/users/me", response_model=PersonalProfile, response_model_exclude_unset=True)
 def me(c: Ctx):
-    u = c.member()
-    return {**{k: getattr(u, k) for k in Profile.model_fields}, "id": u.id, "email": u.email, "guest_average": average(c.s, u.id, "guest")}
+    u = c.member(verified=False)
+    data = {k: getattr(u, k) for k in Profile.model_fields}
+    if data["diet"] and data["diet"] not in OPTIONS["profile_diets"]:
+        data["diet"] = "Autre"  # ancienne valeur saisie en texte libre
+    return {**data, "id": u.id, "email": u.email, "verified": u.verified, "guest_average": average(c.s, u.id, "guest")}
 
 
 @router.patch("/users/me", response_model=PersonalProfile, response_model_exclude_unset=True)
 def edit(data: Profile, c: Ctx):
-    u = c.member()
+    u = c.member(verified=False)
     for k, value in data.model_dump(exclude_unset=True).items():
         setattr(u, k, value)
     return me(c)
@@ -100,15 +141,16 @@ def reviews(uid: int, c: Ctx):
 
 @router.get("/catalog/options")
 def options(c: Ctx):
-    return {**OPTIONS, "sectors": SECTORS, "domains": sorted(c.request.app.state.domains)}
+    return {**OPTIONS, "maps_key": c.request.app.state.maps_key}
 
 
 @router.get("/meals", response_model=list[MealCard])
-def meals(c: Ctx, search: str = "", sector: str = "", distance: float | None = Query(None, ge=0), after: float | None = None,
+def meals(c: Ctx, search: str = "", lat: float | None = Query(None, ge=-90, le=90), lng: float | None = Query(None, ge=-180, le=180),
+          distance: float | None = Query(None, ge=0), after: float | None = None,
           before: float | None = None, diet: str = "", allergen: str = "", language: str = "", mood: str = "",
           kind: str = "", activity: str = "", women: bool = False, available: bool = False):
-    require(not sector or sector in SECTORS, 422, "INVALID_SECTOR", "Secteur inconnu.")
-    require(distance is None or sector, 422, "ORIGIN_REQUIRED", "Choisissez le secteur de départ.")
+    require(distance is None or (lat is not None and lng is not None), 422, "ORIGIN_REQUIRED",
+            "Renseigne ton adresse dans ton profil pour filtrer par distance.")
     q = select(Meal).where(Meal.status == "OPEN", Meal.start > c.now, Meal.hidden.is_(False)).order_by(Meal.start, Meal.id)
     if after is not None:
         q = q.where(Meal.start >= after)
@@ -116,9 +158,9 @@ def meals(c: Ctx, search: str = "", sector: str = "", distance: float | None = Q
         q = q.where(Meal.start < before)
     out = []
     for m in c.s.scalars(q):
-        if sector and math.dist(SECTORS[sector], SECTORS[m.sector]) > (distance or 0):
+        if distance is not None and distance_km(lat, lng, m.area_lat, m.area_lng) > distance:
             continue
-        if search.casefold() not in " ".join([m.title, m.menu, m.description, m.sector]).casefold():
+        if search.casefold() not in " ".join([m.title, m.menu, m.description, m.city]).casefold():
             continue
         if diet and diet not in m.diets or allergen and allergen in m.allergens or language and language not in m.languages:
             continue
@@ -130,11 +172,76 @@ def meals(c: Ctx, search: str = "", sector: str = "", distance: float | None = Q
     return out
 
 
+class PhotoSuggestion(BaseModel):
+    image: str
+    preview: str = ""
+    credit: str = ""
+    credit_url: str = ""
+    found: bool
+
+
+@router.get("/photos/suggest", response_model=PhotoSuggestion)
+def suggest_photo(request: Request, title: str = Query("", max_length=80)):
+    """Photo libre de droits pour un titre de repas, ou l’image par défaut.
+
+    Volontairement sans transaction : l’appel réseau à Openverse ne doit pas bloquer la base.
+    """
+    with Session(request.app.state.engine) as s:
+        login = s.get(LoginSession, digest(request.cookies.get("bc_session", "")))
+        user = login and login.expires > request.app.state.clock() and s.get(User, login.user_id)
+        require(user and user.verified and not user.suspended, 401, "SESSION_REQUIRED", "Connectez-vous pour continuer.")
+    search = request.app.state.photo_search
+    result = search.search(title) if search else None
+    return {**result, "found": True} if result else {"image": DEFAULT_IMAGE, "found": False}
+
+
 @router.post("/meals", response_model=MealCard, status_code=201)
 def create_meal(data: MealForm, c: Ctx):
     u = c.member()
-    mid = create_once(c, "meal", data, lambda: publish(c.s, u, data, c.now).id)
+    final, credit = data, ("", "")
+    if PHOTO_TOKEN.fullmatch(data.image):
+        # Photo déjà téléchargée lors de la suggestion ; si elle a expiré du cache, image par défaut
+        # (pas d’appel réseau ici : la transaction est ouverte).
+        search = c.request.app.state.photo_search
+        photo = search.resolve(data.image) if search else None
+        final = data.model_copy(update={"image": photo["preview"] if photo else DEFAULT_IMAGE})
+        credit = (photo["credit"], photo["credit_url"]) if photo else ("", "")
+    mid = create_once(c, "meal", data, lambda: publish(c.s, u, final, c.now, credit).id)
     return meal_card(c.s, c.s.get(Meal, mid))
+
+
+SUGGEST_RADIUS_KM = 10
+SUGGEST_COUNT = 4
+
+
+class SuggestedMeal(MealCard):
+    distance: float
+
+
+class Suggestions(BaseModel):
+    needs_address: bool
+    meals: list[SuggestedMeal]
+
+
+@router.get("/meals/suggestions", response_model=Suggestions)
+def suggestions(c: Ctx):
+    """Repas à venir proches de l’adresse privée du membre, où il peut encore demander une place."""
+    u = c.member(verified=False)
+    if u.home_lat is None or u.home_lng is None:
+        return {"needs_address": True, "meals": []}
+    active = select(Booking.meal).where(Booking.guest == u.id, Booking.status.in_(ACTIVE))
+    q = select(Meal).where(Meal.status == "OPEN", Meal.start > c.now, Meal.hidden.is_(False), Meal.host != u.id,
+                           Meal.id.not_in(active))
+    found_meals = []
+    for m in c.s.scalars(q):
+        km = distance_km(u.home_lat, u.home_lng, m.area_lat, m.area_lng)
+        if km > SUGGEST_RADIUS_KM or (m.women and u.gender != "Femme"):
+            continue
+        card = meal_card(c.s, m)
+        if card["available"] > 0:
+            found_meals.append({**card, "distance": round(km, 1)})
+    found_meals.sort(key=lambda card: (card["distance"], card["start"]))
+    return {"needs_address": False, "meals": found_meals[:SUGGEST_COUNT]}
 
 
 @router.get("/meals/mine", response_model=list[PersonalMeal], response_model_exclude_unset=True)

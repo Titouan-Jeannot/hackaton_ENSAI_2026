@@ -8,16 +8,16 @@ async function render(){
  if(dialog.open)dialog.close();
  if(route==="main"){main.focus();return;}
  showNav();
- if(!["catalogue","meal","profile","login","register"].includes(route)){
+ if(!["catalogue","meal","profile","login","register"].includes(route)&&!(route==="verify"&&id)){
     if(!auth.user){sessionStorage.setItem("return",location.hash);go("login");return;}
-    if(!auth.user.verified&&route!=="verify"){go("verify");return;}
+    if(!auth.user.verified&&!["verify","account"].includes(route)){go("verify");return;}
  }
  if(route==="verify"&&auth.user?.verified){go(getReturn());return;}
  if((route==="login"||route==="register")&&auth.user){go(auth.user.verified?getReturn():"verify");return;}
  main.setAttribute("aria-busy","true");
  try{
    const html=await (pages[route]||catalogue)(id);
-   if(gen===renderId){main.innerHTML=html;document.title=(main.querySelector("h1")?.textContent||"Les tables")+" · BlablaCook";}
+   if(gen===renderId){main.innerHTML=html;document.title=(main.querySelector("h1")?.textContent||"Les tables")+" · BlablaCook";mountWidgets(main);}
  }catch(e){if(gen===renderId)main.innerHTML=`<div class="panel stack"><h1>Page indisponible</h1><p>${esc(e.message)}</p>${a("catalogue","Revenir aux tables")}</div>`;}
  finally{if(gen===renderId)main.removeAttribute("aria-busy");}
 }
@@ -31,9 +31,8 @@ document.addEventListener("click",async e=>{
  try{
   switch(act){
    case "logout":await api("/auth/logout","POST");auth={user:null};go("catalogue");break;
-   case "verify":auth=await api("/auth/verify-email","POST",{token:auth.demo_verification});go(getReturn());break;
+   case "resend":await api("/auth/resend-verification","POST");message("Un nouveau mail de confirmation vient d’être envoyé.");break;
    case "map":case "list":mapMode=act==="map";await render();break;
-   case "sector":document.getElementById("sector-"+id)?.focus();break;
    case "clear":catalogueFilters={};filterOpen=false;await render();break;
    case "book":await api(`/meals/${id}/bookings`,"POST");message("Demande envoyée à l’hôte.");await render();break;
    case "thread":{const t=await api("/conversations","POST",{meal:Number(id)});go("thread/"+t.id);break;}
@@ -69,20 +68,26 @@ document.addEventListener("submit",async e=>{
   switch(kind){
    case "filters":
     filterOpen=f.querySelector("details").open;
-    if(d.distance&&!d.sector)throw new Error("Choisissez un secteur pour appliquer un rayon.");
     catalogueFilters=Object.fromEntries(Object.entries(d).filter(([,v])=>v!==""));await render();break;
-   case "login":case "register":
-    auth=await api("/auth/"+kind,"POST",d);go(auth.user.verified?getReturn():"verify");break;
+   case "login":
+    auth=await api("/auth/login","POST",d);go(auth.user.verified?getReturn():"verify");break;
+   case "register":
+    auth=await api("/auth/register","POST",d);message("Compte créé ! Un mail de confirmation t’a été envoyé.");go("account");break;
+   case "code":
+    auth=await api("/auth/verify-code","POST",{code:d.code});message("Adresse vérifiée, ton compte est activé !");go(getReturn());break;
    case "publish":{
+    if(!d.image)d.image=(await suggestPhoto(f)).image;
     await applyPhoto(d,fd,"image");
     for(const k of ["diets","languages","allergens"])d[k]=fd.getAll(k);
     for(const k of ["women","uncertain"])d[k]=fd.has(k);
     for(const k of ["minimum","maximum"])d[k]=Number(d[k]);
+    if(!d.lat||!d.lng)throw Object.assign(new Error("Choisis l’adresse du repas dans la liste de suggestions."),{data:{fields:[{field:"address",message:"Adresse non localisée."}]}});
+    d.lat=Number(d.lat);d.lng=Number(d.lng);
     d.duration=d.duration?Number(d.duration):null;
     for(const k of ["start","check_at"])d[k]=new Date(d[k]).toISOString();
     const problems=[];
     if(d.maximum<d.minimum)problems.push({field:"maximum",message:"Le maximum doit couvrir le minimum d’invités."});
-    if(d.check_at>=d.start)problems.push({field:"check_at",message:"Le contrôle doit précéder le repas."});
+    if(d.check_at>=d.start)problems.push({field:"check_at",message:"La date limite du minimum doit précéder le début du repas."});
     if(!d.allergens.length&&!d.uncertain)problems.push({field:"uncertain",message:"Indiquez un allergène connu ou une information incertaine."});
     if(d.kind==="Repas + activité"&&!d.activity)problems.push({field:"activity",message:"Choisissez une activité."});
     if(problems.length)throw Object.assign(new Error(problems[0].message),{data:{fields:problems}});
@@ -90,7 +95,10 @@ document.addEventListener("submit",async e=>{
    }
    case "account":
     if(d.keep_photo)delete d.photo;delete d.keep_photo;await applyPhoto(d,fd,"photo");
-    d.age=d.age?Number(d.age):null;d.public_photo=fd.has("public_photo");d.hidden_guest=fd.has("hidden_guest");
+    d.age=d.age?Number(d.age):null;
+    if(d.clear_home)Object.assign(d,{home_address:"",home_lat:"",home_lng:""});delete d.clear_home;
+    d.home_lat=d.home_lat?Number(d.home_lat):null;d.home_lng=d.home_lng?Number(d.home_lng):null;
+    if(d.home_address&&d.home_lat===null)throw new Error("Choisis ton adresse dans la liste de suggestions.");d.public_photo=fd.has("public_photo");d.hidden_guest=fd.has("hidden_guest");
     await api("/users/me","PATCH",d);auth=await api("/auth/session");message("Profil enregistré.");await render();break;
    case "message":await api(`/conversations/${d.thread}/messages`,"POST",{body:d.body},f.dataset.key);message("Message envoyé.");await render();break;
    case "review":{
@@ -103,7 +111,7 @@ document.addEventListener("submit",async e=>{
   }
  }catch(err){
   errBox.textContent=err.message;
-  const byCode={UNKNOWN_DOMAIN:"email",EMAIL_EXISTS:"email",INVALID_DATE:"start",ORIGIN_REQUIRED:"sector"};
+  const byCode={UNKNOWN_DOMAIN:"email",EMAIL_EXISTS:"email",INVALID_DATE:"start",ORIGIN_REQUIRED:"distance"};
   const issues=err.data?.fields||[{field:byCode[err.data?.code],message:err.message}];
   for(const problem of issues){
    const field=f.elements.namedItem(problem.field);
@@ -115,6 +123,22 @@ document.addEventListener("submit",async e=>{
    field.closest("label")?.append(hint);field.focus();
   }
  }finally{if(btn)btn.disabled=false;}
+});
+/* Photo automatique : on cherche une image d’après le titre pendant la saisie (avec un délai). */
+let photoTimer;
+async function suggestPhoto(f){
+ const title=f.elements.title.value.trim(), box=f.querySelector(".photo-auto");
+ const r=title?await api("/photos/suggest?"+new URLSearchParams({title})).catch(()=>({image:"table",found:false})):{image:"table",found:false};
+ if(f.elements.title.value.trim()!==title)return r;
+ f.elements.image.value=r.image;
+ box.querySelector(".photo-preview").src=r.preview||mealPhoto(r.image);
+ box.querySelector(".photo-note").innerHTML=r.found?`Photo trouvée pour « ${esc(title)} » · <a href="${esc(r.credit_url)}" target="_blank" rel="noopener noreferrer">${esc(r.credit)}</a> (via Openverse)`:title?"Aucune photo trouvée pour ce titre : l’image par défaut sera utilisée.":"Une photo est choisie automatiquement d’après le titre.";
+ return r;
+}
+document.addEventListener("input",e=>{
+ const f=e.target.closest('form[data-form="publish"]');
+ if(!f||e.target.name!=="title")return;
+ f.elements.image.value="";clearTimeout(photoTimer);photoTimer=setTimeout(()=>suggestPhoto(f),600);
 });
 window.addEventListener("hashchange",()=>{window.scrollTo(0,0);render();});
 document.querySelector(".skip").addEventListener("click",e=>{e.preventDefault();main.focus();});
