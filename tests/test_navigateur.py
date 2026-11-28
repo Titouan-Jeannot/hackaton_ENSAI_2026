@@ -18,7 +18,7 @@ def live(tmp_path, monkeypatch):
     # Sans clés externes : la carte et l’autocomplétion affichent leurs replis, aucun appel réseau.
     monkeypatch.delenv("GOOGLE_MAPS_API_KEY", raising=False)
     monkeypatch.setenv("BLABLACOOK_IMAGE_SEARCH", "off")
-    app = create_app(tmp_path/"navigateur.sqlite3", mailer=ConsoleMailer(echo=False))
+    app = create_app(tmp_path/"navigateur.sqlite3", mailer=ConsoleMailer(echo=False), llm=False)
     seed(app.state.engine, time.time())
     with socket.socket() as sock:
         sock.bind(("127.0.0.1",0))
@@ -53,8 +53,11 @@ def test_parcours_chrome(live):
         pytest.skip("Chrome ou Chromium est nécessaire pour la recette navigateur.")
     with sync_playwright() as pw:
         browser=pw.chromium.launch(executable_path=chrome)
-        host=browser.new_context(viewport={"width":1280,"height":800}).new_page()
-        guest=browser.new_context(viewport={"width":390,"height":844},is_mobile=True).new_page()
+        # Les animations de l’interface sont coupées (préférence « réduire les animations », respectée par le site) :
+        # le parcours vérifie le fonctionnement, sans attendre la fin des transitions.
+        calm={"reduced_motion":"reduce"}
+        host=browser.new_context(viewport={"width":1280,"height":800},**calm).new_page()
+        guest=browser.new_context(viewport={"width":390,"height":844},is_mobile=True,**calm).new_page()
         errors=[]
         external=[]
         def local_only(route):
@@ -132,7 +135,7 @@ def test_parcours_chrome(live):
         guest.get_by_label("Motif",exact=True).select_option("Information erronée")
         guest.get_by_role("button",name="Envoyer le signalement").click()
         expect(guest.get_by_text("Signalement transmis.")).to_be_visible()
-        admin=browser.new_page()
+        admin=browser.new_page(**calm)
         login(admin,live,"admin")
         admin.goto(live+"/#admin")
         admin.get_by_role("link",name="Annonce · Information erronée").click()

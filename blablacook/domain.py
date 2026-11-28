@@ -1,7 +1,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 
-from .db import Address, Booking, Meal, MealCancellation, Message, Note, Review, Thread, User
+from .db import Address, Booking, Meal, MealCancellation, Message, Note, Review, Thread, User, meal_labels
 from .geo import AREA_RADIUS, approximate_area
 
 ACTIVE = ("PENDING", "ACCEPTED")
@@ -87,7 +87,9 @@ def publish(s, user, data, now, credit=("", "")):
     require(data.start.timestamp() > now, 422, "INVALID_DATE", "Choisissez un début dans le futur.")
     allowed(not data.women or user.gender == "Femme")
     area_lat, area_lng = approximate_area(data.lat, data.lng)
-    meal = Meal(host=user.id, **data.model_dump(exclude={"start", "check_at", "address", "lat", "lng"}),
+    lists = {"allergens", "diets", "languages", "mood", "activity"}
+    meal = Meal(host=user.id, **data.model_dump(exclude={"start", "check_at", "address", "lat", "lng", *lists}),
+                **meal_labels(s, **data.model_dump(include=lists)),
                 start=data.start.timestamp(), check_at=data.check_at.timestamp(),
                 area_lat=area_lat, area_lng=area_lng, area_radius=AREA_RADIUS,
                 image_credit=credit[0], image_credit_url=credit[1])

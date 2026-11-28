@@ -1,8 +1,10 @@
 from pathlib import Path
 
-from sqlalchemy import (Boolean, CheckConstraint, Column, Float, ForeignKey, Index, Integer,
-                        JSON, String, UniqueConstraint, create_engine, event, inspect, text)
-from sqlalchemy.orm import DeclarativeBase, Session
+from sqlalchemy import (JSON, Boolean, CheckConstraint, Column, Float, ForeignKey, Index, Integer, String, Table,
+                        UniqueConstraint, create_engine, event, inspect, select, text)
+from sqlalchemy.orm import DeclarativeBase, Session, relationship
+
+from . import reference
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_DB = ROOT / "var" / "blablacook-demo.sqlite3"
@@ -18,6 +20,56 @@ def pk():
 
 def ref(target, **kw):
     return Column(Integer, ForeignKey(target), nullable=False, **kw)
+
+
+# --- Tables de référence ----------------------------------------------------------------------------------------
+# Une ligne par valeur possible, remplies au démarrage depuis blablacook/reference.py (fill_reference).
+class Label:
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+
+
+class Allergen(Label, Base):
+    __tablename__ = "allergens"
+
+
+class Diet(Label, Base):
+    __tablename__ = "diets"
+    for_meal = Column(Boolean, nullable=False, default=False)      # proposé dans le formulaire de repas
+    for_profile = Column(Boolean, nullable=False, default=False)   # proposé dans le profil
+
+
+class Language(Label, Base):
+    __tablename__ = "languages"
+
+
+class Mood(Label, Base):
+    __tablename__ = "moods"
+
+
+class Activity(Label, Base):
+    __tablename__ = "activities"
+
+
+def link(name, owner, target):
+    """Table de liaison plusieurs-à-plusieurs : (owner, target) = (« table.colonne », « table.colonne »)."""
+    (owner_table, owner_col), (target_table, target_col) = owner.split("."), target.split(".")
+    return Table(name, Base.metadata,
+                 Column(owner_col, Integer, ForeignKey(owner_table + ".id", ondelete="CASCADE"), primary_key=True),
+                 Column(target_col, Integer, ForeignKey(target_table + ".id"), primary_key=True, index=True))
+
+
+meal_allergens = link("meal_allergens", "meals.meal", "allergens.allergen")
+meal_diets = link("meal_diets", "meals.meal", "diets.diet")
+meal_languages = link("meal_languages", "meals.meal", "languages.language")
+user_allergens = link("user_allergens", "users.user", "allergens.allergen")        # allergies déclarées (privé)
+user_languages = link("user_languages", "users.user", "languages.language")        # langues parlées
+user_moods = link("user_moods", "users.user", "moods.mood")                        # ambiances préférées
+user_activities = link("user_activities", "users.user", "activities.activity")     # activités préférées
+
+
+def names(rows):
+    return [r.name for r in rows]
 
 
 class DemoBatch(Base):
@@ -36,8 +88,8 @@ class User(Base):
     photo = Column(String, default="")
     public_photo = Column(Boolean, default=False)
     hidden_guest = Column(Boolean, default=False)
-    diet = Column(String, default="")
-    allergies = Column(String, default="")
+    diet_id = Column(Integer, ForeignKey("diets.id"))   # régime déclaré (liste déroulante du profil)
+    allergies = Column(String, default="")             # précisions libres en plus des allergènes cochés
     age = Column(Integer)
     gender = Column(String, default="")
     home_address = Column(String, default="")       # adresse privée, sert aux suggestions proches
@@ -51,6 +103,31 @@ class User(Base):
     verification_until = Column(Float)
     verification_sent = Column(Float)
     verification_attempts = Column(Integer, default=0)
+    diet_ref = relationship(Diet)
+    allergen_refs = relationship(Allergen, secondary=user_allergens, order_by=Allergen.id)
+    language_refs = relationship(Language, secondary=user_languages, order_by=Language.id)
+    mood_refs = relationship(Mood, secondary=user_moods, order_by=Mood.id)
+    activity_refs = relationship(Activity, secondary=user_activities, order_by=Activity.id)
+
+    @property
+    def diet(self):
+        return self.diet_ref.name if self.diet_ref else ""
+
+    @property
+    def allergens(self):
+        return names(self.allergen_refs)
+
+    @property
+    def languages(self):
+        return names(self.language_refs)
+
+    @property
+    def moods(self):
+        return names(self.mood_refs)
+
+    @property
+    def activities(self):
+        return names(self.activity_refs)
 
 
 class LoginSession(Base):
@@ -69,13 +146,10 @@ class Meal(Base):
     description = Column(String, default="")
     menu = Column(String, nullable=False)
     ingredients = Column(String, nullable=False)
-    allergens = Column(JSON, nullable=False)
-    uncertain = Column(Boolean, nullable=False)
-    diets = Column(JSON, nullable=False)
-    languages = Column(JSON, nullable=False)
-    mood = Column(String, nullable=False)
+    uncertain = Column(Boolean, nullable=False)        # allergènes incertains
+    mood_id = Column(Integer, ForeignKey("moods.id"), nullable=False)
     kind = Column(String, nullable=False)
-    activity = Column(String, nullable=False)
+    activity_id = Column(Integer, ForeignKey("activities.id"))
     image = Column(String, nullable=False)
     image_credit = Column(String, default="")       # auteur et licence de la photo (photos Openverse)
     image_credit_url = Column(String, default="")
@@ -94,6 +168,31 @@ class Meal(Base):
     threshold_warning = Column(Boolean, default=False)
     warning_seq = Column(Integer, default=0)
     __table_args__ = (CheckConstraint("minimum >= 1 AND maximum >= minimum AND check_at < start"),)
+    allergen_refs = relationship(Allergen, secondary=meal_allergens, order_by=Allergen.id)
+    diet_refs = relationship(Diet, secondary=meal_diets, order_by=Diet.id)
+    language_refs = relationship(Language, secondary=meal_languages, order_by=Language.id)
+    mood_ref = relationship(Mood)
+    activity_ref = relationship(Activity)
+
+    @property
+    def allergens(self):
+        return names(self.allergen_refs)
+
+    @property
+    def diets(self):
+        return names(self.diet_refs)
+
+    @property
+    def languages(self):
+        return names(self.language_refs)
+
+    @property
+    def mood(self):
+        return self.mood_ref.name
+
+    @property
+    def activity(self):
+        return self.activity_ref.name if self.activity_ref else ""
 
 
 class MealCancellation(Base):
@@ -221,7 +320,47 @@ def database(path):
 
     Base.metadata.create_all(engine)
     check_schema(engine, path)
+    fill_reference(engine)
     return engine
+
+
+REFERENCE = {Allergen: reference.ALLERGENS, Diet: reference.DIETS, Language: reference.LANGUAGES,
+             Mood: reference.MOODS, Activity: reference.ACTIVITIES}
+
+
+def fill_reference(engine):
+    """Ajoute les valeurs de référence manquantes (idempotent) et met à jour les drapeaux des régimes."""
+    with Session(engine) as s:
+        for model, values in REFERENCE.items():
+            known = {r.name: r for r in s.scalars(select(model))}
+            for name in values:
+                row = known.get(name) or model(name=name)
+                if model is Diet:
+                    row.for_meal, row.for_profile = name in reference.MEAL_DIETS, name in reference.PROFILE_DIETS
+                s.add(row)
+        s.commit()
+
+
+def label(s, model, name):
+    """Ligne de référence d’après son nom (None pour une valeur vide)."""
+    if not name:
+        return None
+    row = s.scalar(select(model).where(model.name == name))
+    if row is None:
+        raise ValueError(f"Valeur inconnue : {name}")
+    return row
+
+
+def labels(s, model, values):
+    """Lignes de référence, sans doublon, dans l’ordre de la liste de référence."""
+    return sorted((label(s, model, v) for v in dict.fromkeys(values)), key=lambda r: r.id)
+
+
+def meal_labels(s, allergens, diets, languages, mood, activity):
+    """Relations d’un repas à partir des noms reçus par l’API."""
+    return dict(allergen_refs=labels(s, Allergen, allergens), diet_refs=labels(s, Diet, diets),
+                language_refs=labels(s, Language, languages), mood_ref=label(s, Mood, mood),
+                activity_ref=label(s, Activity, activity))
 
 
 class OutdatedSchema(RuntimeError):

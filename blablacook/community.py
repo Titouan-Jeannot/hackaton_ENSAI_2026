@@ -1,12 +1,13 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 
-from .access import Ctx, create_once
+from .access import Context, Ctx, create_once
 from .catalog import reviews
-from .db import Booking, Decision, LoginSession, Meal, Message, Note, Report, Review, Thread, User
+from .db import Booking, Decision, LoginSession, Meal, Message, Note, Report, Review, Thread, User, transaction
 from .domain import ACTIVE, GROUP_MEMBERS, allowed, cancel_meal, found, future, group_members, notify, refresh, require
 from .forms import OPTIONS, DecisionForm, MessageForm, ReportForm, ThreadForm
+from . import icebreakers
 
 class ThreadInfo(BaseModel):
     id: int
@@ -124,6 +125,41 @@ def messages(tid: int, c: Ctx):
     return {**thread_view(c, t), "messages": [dict(id=m.id, author=c.s.get(User, m.author).name, mine=m.author == c.user.id,
             body=m.body, created=m.created, system=bool(m.system)) for m in c.s.scalars(select(Message).where(Message.thread == tid,
             Message.hidden.is_(False)).order_by(Message.id))]}
+
+
+class Icebreaker(BaseModel):
+    text: str
+    hint: str        # d’où vient la question : « Le menu », « D’après la présentation de Hugo »…
+
+
+class Icebreakers(BaseModel):
+    questions: list[Icebreaker]
+    source: str = "rules"   # « llm » si les questions viennent du LLM, « rules » sinon
+
+
+@router.get("/conversations/{tid}/icebreakers", response_model=Icebreakers)
+def icebreaker(tid: int, request: Request, round: int = Query(0, ge=0, le=1000)):
+    """Deux questions pour lancer la discussion (aucune si la conversation est en lecture seule).
+
+    Pas de dépendance Ctx : la base n’est lue que le temps de préparer les données, puis libérée AVANT l’appel
+    éventuel au LLM (un appel réseau ne doit jamais bloquer SQLite)."""
+    app = request.app
+    with transaction(app.state.engine) as s:
+        c = Context(request, s, app.state.clock())
+        t = access_thread(c, tid)
+        if thread_view(c, t)["readonly"]:
+            return {"questions": []}
+        meal = s.get(Meal, t.meal)
+        others = [u for u in (s.get(User, uid) for uid in members(c, t)) if u.id != c.user.id and not u.suspended]
+        fallback = icebreakers.questions(t, meal, c.user, others, c.now, round)
+        prompt, key = icebreakers.facts(t, meal, c.user, others, c.now)
+    llm = app.state.llm
+    generated = llm.icebreakers(key, prompt) if llm else None
+    if generated:
+        start = (round * 2) % len(generated)
+        return {"questions": [generated[(start + k) % len(generated)] for k in range(min(2, len(generated)))],
+                "source": "llm"}
+    return {"questions": fallback}
 
 
 @router.post("/conversations/{tid}/read")

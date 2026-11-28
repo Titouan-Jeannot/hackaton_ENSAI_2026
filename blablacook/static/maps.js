@@ -54,7 +54,7 @@ async function mountMap(box){
   const map=new Map(box,{center:first,zoom:14,mapId:"DEMO_MAP_ID",streetViewControl:false,mapTypeControl:false,fullscreenControl:false});
   const info=new InfoWindow(), bounds=new google.maps.LatLngBounds();
   for(const c of data.circles){
-   const circle=new Circle({map,center:{lat:c.lat,lng:c.lng},radius:c.radius,fillColor:"#b94427",fillOpacity:.22,strokeColor:"#a73c24",strokeWeight:1.5});
+   const circle=new Circle({map,center:{lat:c.lat,lng:c.lng},radius:c.radius,fillColor:"#ff5b2e",fillOpacity:.18,strokeColor:"#f04a24",strokeWeight:1.5});
    bounds.union(circle.getBounds());
    if(c.href)circle.addListener("click",()=>{
     const link=document.createElement("a");link.href=c.href;link.textContent=c.title;
@@ -62,7 +62,7 @@ async function mountMap(box){
    });
   }
   if(data.marker){new AdvancedMarkerElement({map,position:data.marker,title:"Adresse du repas"});bounds.extend(data.marker);}
-  if(data.home){new AdvancedMarkerElement({map,position:data.home,title:"Chez moi",content:new PinElement({background:"#344d38",borderColor:"#344d38",glyphColor:"#fff"}).element});}
+  if(data.home){new AdvancedMarkerElement({map,position:data.home,title:"Chez moi",content:new PinElement({background:"#1d1d1f",borderColor:"#1d1d1f",glyphColor:"#fff"}).element});}
   if(data.circles.length>1)map.fitBounds(bounds,24);
  }catch(e){box.innerHTML=`<p class="warn">${esc(e.message)}</p>`;}
 }

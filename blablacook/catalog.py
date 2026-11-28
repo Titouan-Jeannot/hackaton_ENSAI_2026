@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 
 from .access import (MAX_CODE_ATTEMPTS, RESEND_DELAY, Ctx, code_matches, create_once, digest, issue_verification,
                      password_hash, session_info, start_session)
-from .db import Booking, LoginSession, Meal, Review, User
+from .db import (Activity, Allergen, Booking, Diet, Language, LoginSession, Meal, Mood, Review, User, label,
+                 labels)
+from . import recommend
 from .imagesearch import DEFAULT_IMAGE, PHOTO_TOKEN
 from .domains import student_email
 from .geo import distance_km
@@ -106,16 +108,22 @@ def logout(response: Response, c: Ctx):
 def me(c: Ctx):
     u = c.member(verified=False)
     data = {k: getattr(u, k) for k in Profile.model_fields}
-    if data["diet"] and data["diet"] not in OPTIONS["profile_diets"]:
-        data["diet"] = "Autre"  # ancienne valeur saisie en texte libre
     return {**data, "id": u.id, "email": u.email, "verified": u.verified, "guest_average": average(c.s, u.id, "guest")}
 
 
 @router.patch("/users/me", response_model=PersonalProfile, response_model_exclude_unset=True)
 def edit(data: Profile, c: Ctx):
     u = c.member(verified=False)
+    lists = {"allergens": ("allergen_refs", Allergen), "languages": ("language_refs", Language),
+             "moods": ("mood_refs", Mood), "activities": ("activity_refs", Activity)}
     for k, value in data.model_dump(exclude_unset=True).items():
-        setattr(u, k, value)
+        if k in lists:
+            attr, model = lists[k]
+            setattr(u, attr, labels(c.s, model, value))
+        elif k == "diet":
+            u.diet_ref = label(c.s, Diet, value)
+        else:
+            setattr(u, k, value)
     return me(c)
 
 
@@ -156,15 +164,26 @@ def meals(c: Ctx, search: str = "", lat: float | None = Query(None, ge=-90, le=9
         q = q.where(Meal.start >= after)
     if before is not None:
         q = q.where(Meal.start < before)
+    # Filtres sur les tables de référence, résolus en SQL par les tables de liaison.
+    if diet:
+        q = q.where(Meal.diet_refs.any(Diet.name == diet))
+    if allergen:
+        q = q.where(~Meal.allergen_refs.any(Allergen.name == allergen))
+    if language:
+        q = q.where(Meal.language_refs.any(Language.name == language))
+    if mood:
+        q = q.where(Meal.mood_ref.has(Mood.name == mood))
+    if activity:
+        q = q.where(Meal.activity_ref.has(Activity.name == activity))
+    if kind:
+        q = q.where(Meal.kind == kind)
+    if women:
+        q = q.where(Meal.women.is_(True))
     out = []
     for m in c.s.scalars(q):
         if distance is not None and distance_km(lat, lng, m.area_lat, m.area_lng) > distance:
             continue
         if search.casefold() not in " ".join([m.title, m.menu, m.description, m.city]).casefold():
-            continue
-        if diet and diet not in m.diets or allergen and allergen in m.allergens or language and language not in m.languages:
-            continue
-        if mood and m.mood != mood or kind and m.kind != kind or activity and m.activity != activity or women and not m.women:
             continue
         card = meal_card(c.s, m)
         if not available or card["available"] > 0:
@@ -210,38 +229,34 @@ def create_meal(data: MealForm, c: Ctx):
     return meal_card(c.s, c.s.get(Meal, mid))
 
 
-SUGGEST_RADIUS_KM = 10
-SUGGEST_COUNT = 4
-
-
 class SuggestedMeal(MealCard):
-    distance: float
+    distance: float | None
+    reasons: list[str]
 
 
 class Suggestions(BaseModel):
     needs_address: bool
+    profile_complete: bool
     meals: list[SuggestedMeal]
 
 
 @router.get("/meals/suggestions", response_model=Suggestions)
 def suggestions(c: Ctx):
-    """Repas à venir proches de l’adresse privée du membre, où il peut encore demander une place."""
+    """« Pour toi » : repas ouverts compatibles avec le profil (allergies, régime), classés par préférences et distance."""
     u = c.member(verified=False)
-    if u.home_lat is None or u.home_lng is None:
-        return {"needs_address": True, "meals": []}
     active = select(Booking.meal).where(Booking.guest == u.id, Booking.status.in_(ACTIVE))
     q = select(Meal).where(Meal.status == "OPEN", Meal.start > c.now, Meal.hidden.is_(False), Meal.host != u.id,
                            Meal.id.not_in(active))
-    found_meals = []
-    for m in c.s.scalars(q):
-        km = distance_km(u.home_lat, u.home_lng, m.area_lat, m.area_lng)
-        if km > SUGGEST_RADIUS_KM or (m.women and u.gender != "Femme"):
-            continue
+    if u.gender != "Femme":
+        q = q.where(Meal.women.is_(False))
+    out = []
+    for m, _, reasons, km in recommend.rank(u, c.s.scalars(q), c.now):
         card = meal_card(c.s, m)
         if card["available"] > 0:
-            found_meals.append({**card, "distance": round(km, 1)})
-    found_meals.sort(key=lambda card: (card["distance"], card["start"]))
-    return {"needs_address": False, "meals": found_meals[:SUGGEST_COUNT]}
+            out.append({**card, "distance": round(km, 1) if km is not None else None, "reasons": reasons})
+        if len(out) == recommend.COUNT:
+            break
+    return {"needs_address": u.home_lat is None, "profile_complete": recommend.profile_complete(u), "meals": out}
 
 
 @router.get("/meals/mine", response_model=list[PersonalMeal], response_model_exclude_unset=True)

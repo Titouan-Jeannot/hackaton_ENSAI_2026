@@ -38,7 +38,7 @@ def offer(clock, **updates):
 def world(tmp_path):
     clock = Clock()
     path = tmp_path / "recette.sqlite3"
-    app = create_app(path, clock, mailer=ConsoleMailer(echo=False), photo_search=False)
+    app = create_app(path, clock, mailer=ConsoleMailer(echo=False), photo_search=False, llm=False)
     clients = []
 
     def client():

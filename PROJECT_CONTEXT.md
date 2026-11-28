@@ -15,6 +15,8 @@ Fonctionnalités en place :
   redirection vers le profil juste après l'inscription ; sessions par cookie + jeton CSRF ;
 - profil : prénom, bio, photo/avatar, **régime en liste déroulante**, allergies, âge, genre, **adresse privée**,
   options de confidentialité ;
+- **suggestions « Pour toi »** d'après le profil : jamais un allergène déclaré ni un régime non respecté, classement
+  par préférences (ambiance, activité, langues), distance et date, avec les raisons affichées sur chaque carte ;
 - catalogue public avec filtres, vue liste / **carte Google Maps** (cercles approximatifs), **suggestions de repas
   proches de l'adresse de l'utilisateur** en haut de l'accueil ;
 - publication de repas (immuable) : adresse seule avec **autocomplétion Google**, **photo choisie automatiquement
@@ -25,7 +27,9 @@ Fonctionnalités en place :
 - repas « Entre femmes » ;
 - messagerie : fils privés invité ↔ hôte (avant réservation) et **chat de groupe par repas** (hôte + invités
   acceptés, ajout automatique à l'acceptation) ; notifications internes ;
-- signalements et modération avec journal des décisions.
+- signalements et modération avec journal des décisions ;
+- **version mobile installable (PWA)** : manifeste, icônes, service worker, barre d'onglets en bas sur téléphone
+  (Tables · Réservations · ＋ · Messages · Profil), hub « Profil », installation guidée (Android/Chrome et iOS).
 
 ## 2. Stack technique
 
@@ -51,8 +55,12 @@ hackaton_ENSAI_2026/
 │   ├── access.py       # hachage scrypt, sessions, CSRF, Context (ctx.user, ctx.now), idempotence,
 │   │                   # émission des jetons/codes de vérification
 │   ├── domain.py       # règles métier : publication, demandes, transitions, minimum, annulation, avis, chat de groupe
-│   ├── forms.py        # schémas d'entrée Pydantic + listes communes (OPTIONS)
+│   ├── reference.py    # listes de référence (allergènes, régimes, langues, ambiances, activités) et règles de
+│   │                   # compatibilité des régimes : source unique pour la base et les formulaires
+│   ├── recommend.py    # suggestions « Pour toi » : filtre de sécurité (allergènes, régime) puis score + raisons
+│   ├── forms.py        # schémas d'entrée Pydantic + OPTIONS (construites depuis reference.py)
 │   ├── views.py        # projections de sortie (publique / personnelle) : MealCard, PersonalMeal…
+│   ├── app.py          # (aussi) /manifest.webmanifest et /sw.js servis à la racine de l'appli (portée du SW)
 │   ├── catalog.py      # routes auth, profils, repas, suggestions, photos, réservations, avis
 │   ├── community.py    # routes messagerie (privée + groupe), notifications, signalements, administration
 │   ├── mailer.py       # envoi des mails (SMTP ou console) + gabarit du mail de confirmation
@@ -88,9 +96,12 @@ Principes à respecter :
 
 | Table | Colonnes principales |
 | --- | --- |
-| `users` | id, **email (unique)**, password (scrypt `sel:hash`), name, bio, photo, public_photo, hidden_guest, diet (liste fermée), allergies, age, gender, home_address / home_lat / home_lng (privés), verified, suspended, admin, verification (sha256 du jeton du lien), verification_code (sha256 du code), verification_until, verification_sent, verification_attempts |
+| `users` | id, **email (unique)**, password (scrypt `sel:hash`), name, bio, photo, public_photo, hidden_guest, diet_id → `diets`, allergies (précisions libres), age, gender, home_address / home_lat / home_lng (privés), verified, suspended, admin, verification (sha256 du jeton du lien), verification_code (sha256 du code), verification_until, verification_sent, verification_attempts |
 | `sessions` | token (sha256 du cookie), user_id, csrf, expires |
-| `meals` | id, host, title, description, menu, ingredients, allergens (JSON), uncertain, diets (JSON), languages (JSON), mood, kind, activity, image (nom local ou data URL JPEG, y compris les photos Openverse téléchargées), image_credit, image_credit_url, city, area_lat / area_lng / area_radius (cercle **public** décalé), start, duration, check_at (« date limite pour atteindre le minimum »), minimum, maximum, women, status (OPEN/CANCELLED/COMPLETED), hidden, threshold_warning, warning_seq |
+| `meals` | id, host, title, description, menu, ingredients, uncertain, mood_id → `moods`, kind, activity_id → `activities` (NULL si aucune), image (nom local ou data URL JPEG, y compris les photos Openverse téléchargées), image_credit, image_credit_url, city, area_lat / area_lng / area_radius (cercle **public** décalé), start, duration, check_at (« date limite pour atteindre le minimum »), minimum, maximum, women, status (OPEN/CANCELLED/COMPLETED), hidden, threshold_warning, warning_seq |
+| `allergens`, `diets`, `languages`, `moods`, `activities` | **tables de référence** : id, name (unique) ; `diets` porte aussi for_meal / for_profile. Remplies au démarrage depuis `reference.py` (`db.fill_reference`, idempotent) |
+| `meal_allergens`, `meal_diets`, `meal_languages` | **liaisons** repas ↔ référence (clé primaire composée, cascade à la suppression du repas) |
+| `user_allergens`, `user_languages`, `user_moods`, `user_activities` | **liaisons** profil ↔ référence : allergies, langues parlées, ambiances et activités préférées (privées) |
 | `addresses` | meal (PK), address, lat, lng — adresse et position exactes, stockées à part, jamais publiques |
 | `bookings` | id, meal, guest, status (PENDING, ACCEPTED, WITHDRAWN, REJECTED, EXPIRED, CANCELLED_BY_HOST, CANCELLED_BY_GUEST, ADMIN_CLOSED, ATTENDED, NO_SHOW), created, changed |
 | `reviews` | id, booking, author (NULL = avis automatique), recipient, role (host/guest), score, criteria, comment, reason, status |
@@ -129,6 +140,7 @@ Variables d'environnement (voir `.env.example`, ne jamais écrire les vraies val
 | `BLABLACOOK_SMTP_HOST`, `BLABLACOOK_SMTP_PORT`, `BLABLACOOK_SMTP_SECURITY` (starttls/ssl/none), `BLABLACOOK_SMTP_USER`, `BLABLACOOK_SMTP_PASSWORD`, `BLABLACOOK_MAIL_FROM` | envoi des mails ; sans hôte SMTP, les mails s'affichent dans le terminal du serveur |
 | `GOOGLE_MAPS_API_KEY` | clé navigateur (Maps JavaScript API + Places API (New)), à restreindre par référent HTTP |
 | `BLABLACOOK_IMAGE_SEARCH` | `on` (défaut) ou `off` : recherche de photos Openverse (aucune clé nécessaire) |
+| `BLABLACOOK_LLM_KEY`, `BLABLACOOK_LLM_URL`, `BLABLACOOK_LLM_MODEL` | brise-glace par IA (facultatif) : API gratuite au format OpenAI, Groq par défaut (`openai/gpt-oss-120b`, `llama-3.3-70b-versatile` ayant été retiré par Groq) ; sans clé, questions par règles |
 
 Tests : `create_app(path, clock, mailer=ConsoleMailer(echo=False), photo_search=...)` ; le code de vérification
 se lit dans `app.state.mailer.outbox` (voir `tests/conftest.py::last_mail`).
@@ -177,6 +189,29 @@ se lit dans `app.state.mailer.outbox` (voir `tests/conftest.py::last_mail`).
 - **Renommage** (validé par l'utilisateur) : « Contrôle du minimum » devient « Date limite pour atteindre le
   minimum d'invités » dans l'interface uniquement ; la colonne reste `check_at` pour éviter une migration.
 
+- **Schéma normalisé** (décidé avec l'utilisateur) : les listes JSON et les textes libres (allergènes, régimes,
+  langues, ambiance, activité) sont remplacés par des tables de référence et des tables de liaison. L'API garde le
+  même contrat (listes de noms) : les modèles exposent des propriétés (`meal.allergens`, `user.diet`…), l'écriture
+  passe par `db.label/labels/meal_labels`. Les filtres du catalogue sont résolus en SQL (`any()`/`has()`).
+  « Vegan » du profil devient « Végétalien » (même valeur que pour les repas). `reset-demo` ne vide pas les tables
+  de référence.
+- **Suggestions « Pour toi »** (`recommend.py`, décidé avec l'utilisateur : filtre + score, à la place de « Près de
+  chez toi ») : écartés si un allergène du profil est présent, si les allergènes sont incertains alors que le membre
+  a des allergies, ou si le régime n'est pas respecté (`reference.DIET_NEEDS` : régime déclaré par le repas, un
+  régime plus strict suffit, ex. halal → végétarien ; `DIET_WITHOUT` : sans gluten / sans lactose déduits des
+  allergènes certains). Score : régime +3 (+2 via un régime plus strict), allergies respectées +1, ambiance +2,
+  activité +2, langue commune autre que le français +1 (aucune langue commune −2), proximité jusqu'à +3 (rayon
+  10 km si l'adresse est connue, sinon pas de filtre de distance), repas dans les 3 jours +1. 6 suggestions max.
+
+- **PWA** (décidé avec l'utilisateur : appli web installable plutôt qu'appli native ; onglets en bas, style
+  actuel). Le service worker (`static/sw.js`, servi en `/sw.js`) ne met **jamais** `/api/*` en cache (données
+  personnelles, état des réservations) ; la page d'accueil est « réseau d'abord » avec copie de secours hors ligne,
+  `/static/*` en « stale-while-revalidate ». Changer `VERSION` dans `sw.js` invalide le cache. Tous les chemins
+  sont relatifs, l'appli fonctionne donc derrière le proxy SSP Cloud. L'installation exige HTTPS (ou
+  `127.0.0.1`/`localhost`) : sur téléphone, passer par l'URL SSP Cloud. Au-delà de 760 px, le menu du haut reste
+  et la barre d'onglets est masquée. Icônes générées depuis `icon.svg` (pleines, utilisables en « maskable » et
+  pour iOS).
+
 ## 7. Journal des modifications
 
 ### 2026-11-27 — Reprise du projet
@@ -220,6 +255,86 @@ se lit dans `app.state.mailer.outbox` (voir `tests/conftest.py::last_mail`).
 - Vérifié en réel sur 10 titres (9 photos pertinentes, titre inconnu → image par défaut) ; test
   `test_automatic_meal_photo` réécrit avec un faux client (24 tests réussis, 1 ignoré).
 - Les réglages réels (Google Maps, SMTP) ont été déplacés de `.env.example` vers `.env` (ignoré par git).
+
+### 2026-11-27 — Vidéo de présentation du hackathon
+- `presentation/video.py` : lance un serveur sur une base temporaire (`seed`, `ConsoleMailer` : aucun vrai mail),
+  pilote Chrome avec Playwright (curseur animé, étiquettes de séquence, fondus, décors « téléphone » avec l’appli en
+  iframe), filme par `Page.startScreencast` (CDP) et assemble `presentation/blablacook-presentation.mp4` avec ffmpeg
+  (H.264, 1920×1080, 30 i/s, ≈ 2 min 56). Les pages ordinateur sont agrandies de 30 % pendant le tournage.
+- Aucune modification du code de l’application. Les changements « style Strava / fil / onglets » restent dans
+  `git stash` (non appliqués).
+
+### 2026-11-27 — Base normalisée et suggestions selon le profil (26 tests + recette navigateur réussis)
+- Nouvelles tables de référence et de liaison (voir §4) ; colonnes JSON/texte supprimées de `meals` et `users`.
+- Profil : allergies en cases à cocher (14 allergènes) + précisions libres, régime en liste déroulante, nouvelles
+  préférences (langues parlées, ambiances, activités) ; formulaire de repas : régimes Halal et Casher ajoutés.
+- Accueil : section « Pour toi » (raisons affichées en pastilles) et invitation à compléter son profil.
+- Démo : préférences pour chaque compte, régimes variés sur les repas. **La base de démo doit être recréée**
+  (`check_schema` refuse l'ancienne : supprimer `var/blablacook-demo.sqlite3`).
+- Tests : `test_profile_lists_are_normalized`, `test_suggestions_follow_profile` ; tests existants adaptés
+  (« Végétalien », format des suggestions).
+
+### 2026-11-27 — Version mobile installable (27 tests + recette navigateur réussis)
+- `static/manifest.webmanifest`, `static/sw.js`, `static/icons/` (192, 512, apple-touch-icon 180) ; méta iOS/Android
+  dans `index.html`.
+- Barre d'onglets mobile, cloche de notifications et pastilles de non-lus, page `#me` (hub Profil + « Installer
+  BlablaCook »), dialogues en panneau bas, champs 16 px, zones sûres (encoche), messages hors connexion.
+- Vérifié dans Chrome : manifeste sans erreur, service worker actif, aucun critère d'installabilité manquant.
+- Test `tests/test_mobile.py`. La vidéo de présentation n'a pas été retournée.
+
+### 2026-11-28 — Finitions visuelles
+- En-tête : logo moins serré, menu ordinateur espacé (bug : les liens étaient collés depuis l'ajout du menu
+  mobile), menu utilisateur en pastille avec initiale, en-tête collant.
+- Accueil connecté : bandeau « Bonjour/Bonsoir, prénom » à la place de la grande bannière (réservée aux visiteurs,
+  avec un bouton « Rejoindre ») ; « Pour toi » en carrousel horizontal.
+- Cartes : pastilles (ambiance, activité, entre femmes, allergènes incertains), 3 raisons max sans la distance
+  (déjà affichée), survol animé. « Mes repas » / « Mes réservations » : date, statut coloré et invités en pastilles.
+
+### 2026-11-28 — Nouvelle identité visuelle (inspirée d'apple.com)
+- `app.css` réécrit : typographie système (SF Pro sur Apple), fond #fbfbfd / #f5f5f7, texte #1d1d1f, boutons en
+  pilule, cartes blanches très arrondies avec ombres douces, barres translucides floutées, dégradé signature
+  safran → paprika → framboise (`--grad`, classe `.grad`). Ancienne palette crème/serif abandonnée.
+- Nouveau logo `icon.svg` : bulle de conversation (« Blabla ») contenant un bol fumant (« Cook ») en dégradé ;
+  icônes PWA régénérées, couleur de thème #fbfbfd, cache du service worker passé en `blablacook-v2`.
+- Accueil visiteur façon page produit : grand titre centré, bannière qui s'élargit au défilement (`heroZoom`),
+  grille « bento » de 4 arguments. Accueil connecté : « Bonsoir, prénom. Qu'est-ce qu'on mange ? ».
+- Animations (`common.js`) : apparition au défilement (`animateIn`, IntersectionObserver, décalage en cascade),
+  transition à chaque changement de page, survol des cartes (zoom photo, flèche), pastilles qui pulsent, onglet
+  actif qui rebondit, dialogues en fondu / panneau bas. Tout est désactivé si l'utilisateur demande moins
+  d'animations (`prefers-reduced-motion`).
+
+### 2026-11-28 — Brise-glace dans les conversations
+- `blablacook/icebreakers.py` : banque de questions (générales + liées au repas : activité, ambiance, langue
+  autre que le français, titre du plat ; avant le repas : « qui apporte quoi » en groupe, questions différentes
+  côté invité et côté hôte en privé ; après le repas : souvenirs et prochaine table). Deux questions par
+  proposition, en alternant contexte et général ; ordre stable par conversation (graine = id du fil),
+  `round` pour « Autres idées ».
+- Route `GET /api/conversations/{id}/icebreakers?round=n` (membres du fil seulement ; liste vide si lecture seule).
+- Interface : encart « Brise-glace » au-dessus du message (ouvert si personne n'a encore écrit, replié en
+  « Besoin d'une idée pour relancer ? » sinon) ; un clic ajoute la question au message, sans l'envoyer.
+- Tests `tests/test_brise_glace.py`. `test_navigateur.py` tourne désormais avec « réduire les animations »
+  (12 s au lieu de 45 s, plus d'attente des transitions).
+
+### 2026-11-28 — Brise-glace plus précis
+- Questions construites à partir : du menu (mot-clé → question dédiée : pâtes, carbonara, couscous, galettes…),
+  de la présentation PUBLIQUE des autres participants (plats cités, passions, études → question à leur prénom),
+  du moment (« Rendez-vous ce soir/demain soir/samedi soir… », heure de Paris), de la taille de la tablée, de
+  l'activité, de l'ambiance, de la langue, et des préférences du membre qui écrit, formulées à la 1re personne.
+- Les plus personnelles d'abord, en variant les sources ; chaque question porte une indication (`hint`) :
+  « Le menu », « D'après la présentation de Hugo », « Le rendez-vous »… La réponse de l'API devient
+  `[{text, hint}]`.
+- Confidentialité : allergies, régime et préférences des autres participants ne sont jamais utilisés (testé).
+
+### 2026-11-28 — Brise-glace par LLM gratuit + correctif de cache
+- Bug « [object Object] » : le navigateur (service worker) servait l'ancien JS. Les CSS/JS sont maintenant
+  appelés avec une empreinte (`?v=…`, `app.asset_version()`) qui change à chaque modification ; cache SW `v3`.
+- `blablacook/llm.py` : client « chat completions » au format OpenAI (Groq par défaut, `openai/gpt-oss-120b` avec `reasoning_effort: low` ; Gemini, Mistral
+  possibles), délai 6 s, cache 6 h par fil/personne/phase/jour, réponse JSON filtrée (`parse`). Décision avec
+  l'utilisateur : API gratuite en ligne, LLM + secours par règles.
+- Route `/conversations/{id}/icebreakers` sans `Ctx` : lecture en base puis libération du verrou SQLite AVANT
+  l'appel réseau ; renvoie `source: "llm" | "rules"` (mention « Idées proposées par une IA » dans l'interface).
+- Seules les données publiques sont envoyées (`icebreakers.facts`) : repas, prénoms, présentations publiques.
+- Tests : fournisseur simulé (`httpx.MockTransport`) ; `create_app(llm=False)` dans les tests.
 
 **Reste à faire / pistes** :
 - Tester en conditions réelles la clé Google Maps et le compte SMTP (renseignés dans `.env` ; non testés ici,

@@ -1,6 +1,6 @@
 const pages={catalogue,meal:mealDetail,publish:publishPage,host:hostPage,bookings:bookingsPage,
  login:()=>authPage(false),register:()=>authPage(true),verify:verifyPage,account,profile:publicProfile,messages:messagesPage,
- thread:threadPage,notes:notesPage,admin:adminPage,case:casePage};
+ thread:threadPage,notes:notesPage,admin:adminPage,case:casePage,me:mePage};
 async function render(){
  const gen=++renderId;
  const [route,id]=routeParts();
@@ -17,7 +17,7 @@ async function render(){
  main.setAttribute("aria-busy","true");
  try{
    const html=await (pages[route]||catalogue)(id);
-   if(gen===renderId){main.innerHTML=html;document.title=(main.querySelector("h1")?.textContent||"Les tables")+" · BlablaCook";mountWidgets(main);}
+   if(gen===renderId){main.innerHTML=html;document.title=(main.querySelector("h1")?.textContent||"Les tables")+" · BlablaCook";mountWidgets(main);animateIn(main);}
  }catch(e){if(gen===renderId)main.innerHTML=`<div class="panel stack"><h1>Page indisponible</h1><p>${esc(e.message)}</p>${a("catalogue","Revenir aux tables")}</div>`;}
  finally{if(gen===renderId)main.removeAttribute("aria-busy");}
 }
@@ -52,6 +52,19 @@ document.addEventListener("click",async e=>{
    case "report":{const [kind,target]=id.split("/");openDialog(`<div class="stack"><h2>Signaler ce contenu</h2>${form("report",`<input type="hidden" name="kind" value="${esc(kind)}"><input type="hidden" name="target" value="${esc(target)}">${selectField("Motif","reason",options.reasons,"","Choisir…",true)}${area("Précisions facultatives","comment")}`,"Envoyer le signalement")}</div>`);break;}
    case "note":{const n=(await api("/notifications/me")).find(v=>v.id===Number(id));await api(`/notifications/${id}/read`,"POST");go(n.link.slice(1));break;}
    case "dismiss":dialog.close();break;
+   case "install":await installApp();break;
+   case "ice":{  // glisse la question dans le message, sans l’envoyer
+     const box=document.querySelector('form[data-form="message"] textarea[name="body"]');
+     box.value=box.value.trim()?box.value.trimEnd()+"\n"+id:id;box.focus();box.setSelectionRange(box.value.length,box.value.length);
+     el.classList.add("picked");break;
+   }
+   case "iceMore":{
+     const round=Number(el.dataset.round)+1, r=await api(`/conversations/${id}/icebreakers?round=${round}`);
+     el.dataset.round=round;
+     el.parentElement.querySelector(".ice-list").innerHTML=r.questions.map(iceButton).join("");
+     break;
+   }
+   case "scrollTables":document.querySelector("#tables")?.scrollIntoView({behavior:motionOK?"smooth":"auto"});break;
   }
  }catch(err){if(dialog.open)dialog.close();message(err.message);if(err.data?.code==="MEAL_FULL")await render();}
  finally{el.disabled=false;}
@@ -95,6 +108,7 @@ document.addEventListener("submit",async e=>{
    }
    case "account":
     if(d.keep_photo)delete d.photo;delete d.keep_photo;await applyPhoto(d,fd,"photo");
+    for(const k of ["allergens","languages","moods","activities"])d[k]=fd.getAll(k);
     d.age=d.age?Number(d.age):null;
     if(d.clear_home)Object.assign(d,{home_address:"",home_lat:"",home_lng:""});delete d.clear_home;
     d.home_lat=d.home_lat?Number(d.home_lat):null;d.home_lng=d.home_lng?Number(d.home_lng):null;
@@ -142,8 +156,23 @@ document.addEventListener("input",e=>{
 });
 window.addEventListener("hashchange",()=>{window.scrollTo(0,0);render();});
 document.querySelector(".skip").addEventListener("click",e=>{e.preventDefault();main.focus();});
+/* Appli installable : service worker, invite d’installation (Android/Chrome), mode d’emploi (iOS). */
+let installPrompt=null;
+window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();installPrompt=e;});
+window.addEventListener("appinstalled",()=>{installPrompt=null;message("BlablaCook est installée sur ton écran d’accueil.");});
+function installed(){return matchMedia("(display-mode: standalone)").matches||navigator.standalone===true;}
+async function installApp(){
+ if(installPrompt){installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;await render();return;}
+ const ios=/iphone|ipad|ipod/i.test(navigator.userAgent);
+ openDialog(`<div class="stack"><h2>Installer BlablaCook</h2>${ios?`<ol class="steps"><li>Ouvre cette page dans <strong>Safari</strong>.</li><li>Touche le bouton <strong>Partager</strong> (carré avec une flèche).</li><li>Choisis <strong>Sur l’écran d’accueil</strong>, puis <strong>Ajouter</strong>.</li></ol>`
+  :`<p>Ouvre le menu de ton navigateur (⋮) et choisis <strong>Installer l’application</strong> ou <strong>Ajouter à l’écran d’accueil</strong>.</p>`}<div>${action("Compris","dismiss","","primary")}</div></div>`);
+}
+if("serviceWorker" in navigator)window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
+window.addEventListener("offline",()=>message("Hors connexion : les actions reprendront au retour du réseau."));
+window.addEventListener("online",()=>{message("De nouveau en ligne.");render();});
+if(installed())document.documentElement.classList.add("standalone");
 (async()=>{
  try{[options,auth]=await Promise.all([api("/catalog/options"),api("/auth/session")]);await render();}
- catch(e){main.textContent="Le chargement a échoué. "+e.message;}
+ catch(e){main.innerHTML=`<div class="panel stack"><h1>Chargement impossible</h1><p>${esc(e.message)}</p><div><button class="primary" onclick="location.reload()">Réessayer</button></div></div>`;}
 })();
 

@@ -20,13 +20,25 @@ async function verifyPage(token){
  }
  return `<div class="narrow">${head("Vérifier mon adresse")}${verifyBox()}<p>${a("account","Compléter mon profil en attendant")}</p></div>`;
 }
+/* Onglet « Profil » (surtout sur téléphone) : accès à tout l’espace personnel et installation de l’appli. */
+async function mePage(){
+ const u=auth.user, p=await api("/users/"+u.id);
+ const row=(r,t,ic)=>`<a class="menu-row" href="#${r}">${icon(ic)}<span>${esc(t)}</span>${icon("chevron")}</a>`;
+ return `<div class="narrow"><section class="panel me-head">${avatar(p)}<div><h1>${esc(p.name)}</h1><p class="sub">${esc(u.email)}${p.host_average!==null?" · "+p.host_average+" ★ en tant qu’hôte":""}</p></div></section>
+ ${installed()?"":`<button type="button" class="install-card" data-act="install">${icon("download")}<span><strong>Installer BlablaCook</strong><small>Ajoute l’appli à ton écran d’accueil, en plein écran.</small></span>${icon("chevron")}</button>`}
+ <nav class="panel menu-list" aria-label="Mon espace">${row("account","Mon profil, allergies et préférences","user")}${row("host","Mes repas","plate")}${row("bookings","Mes réservations","date")}${row("notes","Notifications","bell")}${row("profile/"+u.id,"Mon profil public et mes avis","group")}${u.admin?row("admin","Administration","list"):""}
+ <button type="button" class="menu-row logout-row" data-act="logout"><span>Se déconnecter</span></button></nav></div>`;
+}
 async function account(){
  const p=await api("/users/me");
  return `<div class="narrow">${head("Mon profil",p.email)}${p.verified?"":verifyBox()}${form("account",`<section class="panel stack"><h2>Profil public</h2>${field("Prénom","name","text",p.name,"required maxlength=80")}${area("Présentation","bio",p.bio)}
  ${selectField("Avatar illustré","photo",options.photos.filter(Boolean),p.photo,"Initiale")}${p.photo.startsWith("data:")?'<label class="check"><input type="checkbox" name="keep_photo" checked>Conserver ma photo actuelle</label>':""}${photoInput("Importer une photo de profil")}${check("Rendre ma photo publique","public_photo",p.public_photo)}
  ${check("Me masquer auprès des autres invités confirmés","hidden_guest",p.hidden_guest)}</section>
- <section class="panel stack"><h2>Informations privées</h2><div class="fields">${selectField("Genre déclaré","gender",options.genders,p.gender,"Non renseigné")}${field("Âge","age","number",p.age,"min=1 max=120")}${selectField("Régime alimentaire","diet",options.profile_diets,p.diet,"Non renseigné")}${field("Allergies","allergies","text",p.allergies)}</div>
- ${placeField("Mon adresse (privée, sert aux suggestions de repas proches)",{address:"home_address",lat:"home_lat",lng:"home_lng"},{address:p.home_address,lat:p.home_lat,lng:p.home_lng})}${p.home_address?check("Effacer mon adresse","clear_home"):""}</section>`,"Enregistrer le profil")}<p>${a("profile/"+p.id,"Voir mon profil et mes avis")}</p></div>`;
+ <section class="panel stack"><h2>Informations privées</h2><div class="fields">${selectField("Genre déclaré","gender",options.genders,p.gender,"Non renseigné")}${field("Âge","age","number",p.age,"min=1 max=120")}${selectField("Régime alimentaire","diet",options.profile_diets,p.diet,"Non renseigné")}</div>
+ ${choice("Mes allergies","allergens",options.allergens,p.allergens)}${field("Autres allergies ou précisions","allergies","text",p.allergies,"maxlength=500")}
+ ${placeField("Mon adresse (privée, sert aux suggestions de repas proches)",{address:"home_address",lat:"home_lat",lng:"home_lng"},{address:p.home_address,lat:p.home_lat,lng:p.home_lng})}${p.home_address?check("Effacer mon adresse","clear_home"):""}</section>
+ <section class="panel stack"><h2>Mes préférences</h2><p class="muted">Elles servent aux suggestions « Pour toi » de l’accueil. Les repas qui contiennent un de tes allergènes ou ne respectent pas ton régime n’y apparaissent jamais.</p>
+ ${choice("Langues parlées","languages",options.languages.filter(v=>v!=="Non renseigné"),p.languages)}${choice("Ambiances préférées","moods",options.moods.filter(v=>v!=="Non renseigné"),p.moods)}${choice("Activités préférées","activities",options.activities,p.activities)}</section>`,"Enregistrer le profil")}<p>${a("profile/"+p.id,"Voir mon profil et mes avis")}</p></div>`;
 }
 async function publicProfile(id){
  const [p,r]=await Promise.all([api("/users/"+id),api(`/users/${id}/reviews`)]);
@@ -38,10 +50,22 @@ async function messagesPage(){
  const threads=await api("/conversations/me"),notes=await api("/notifications/me");
  return `<div class="narrow">${head("Messages")}<div class="stack">${threads.map(t=>`<article class="item"><h3>${a("thread/"+t.id,t.group?"Chat du repas · "+t.title:t.other)}</h3><p>${esc(t.group?t.members.join(", "):t.title)}${t.readonly?" · Lecture seule":""}${notes.some(n=>!n.read&&n.link==="#thread/"+t.id)?" · Nouveau message":""}</p></article>`).join("")||empty("Pour écrire à un hôte, ouvrez la fiche de son repas.")}</div></div>`;
 }
+function iceButton(q){if(typeof q==="string")q={text:q,hint:""};return `<button type="button" class="ice-q" data-act="ice" data-id="${esc(q.text)}"><small>${esc(q.hint)}</small>${esc(q.text)}</button>`;}
+let iceSource="rules";
+function icebreakerHtml(tid,questions,quiet){
+ if(!questions.length)return "";
+ const ai=iceSource==="llm"?`<p class="ice-ai">✨ Idées proposées par une IA à partir des infos publiques du repas</p>`:"";
+ const body=`<div class="ice-list">${questions.map(iceButton).join("")}</div>
+ <button type="button" class="more ice-more" data-act="iceMore" data-id="${tid}" data-round="0">Autres idées</button>${ai}`;
+ return quiet?`<details class="icebreaker"><summary>${icon("spark")} Besoin d’une idée pour relancer ?</summary>${body}</details>`
+  :`<section class="icebreaker open" aria-label="Brise-glace"><p class="ice-title">${icon("spark")} Brise-glace</p><p class="muted small">Pas d’inspiration ? Touche une question pour l’ajouter à ton message.</p>${body}</section>`;
+}
 async function threadPage(id){
- const t=await api(`/conversations/${id}/messages`);
+ const [t,ice]=await Promise.all([api(`/conversations/${id}/messages`),api(`/conversations/${id}/icebreakers`).catch(()=>({questions:[]}))]);
+ iceSource=ice.source;
  await api(`/conversations/${id}/read`,"POST");
- return `<div class="narrow">${a("messages","← Tous les messages","back")}${head(t.group?"Chat du repas":t.other,t.group?t.title+" · "+t.members.join(", "):t.title)}<div class="stack">${t.messages.map(m=>m.system?`<p class="system-msg">${esc(m.body)} · ${esc(dt(m.created))}</p>`:`<article class="item"><strong>${esc(m.author)} · ${esc(dt(m.created))}</strong><p class="preserve">${esc(m.body)}</p>${reportBtn("message",m.id)}</article>`).join("")||empty("Commencez la conversation.")}${t.readonly?empty("Cette conversation est en lecture seule."):form("message",`<input type="hidden" name="thread" value="${t.id}">${area("Votre message","body","",true)}`,"Envoyer le message")}</div></div>`;
+ const talked=t.messages.some(m=>!m.system);
+ return `<div class="narrow">${a("messages","← Tous les messages","back")}${head(t.group?"Chat du repas":t.other,t.group?t.title+" · "+t.members.join(", "):t.title)}<div class="stack">${t.messages.map(m=>m.system?`<p class="system-msg">${esc(m.body)} · ${esc(dt(m.created))}</p>`:`<article class="item"><strong>${esc(m.author)} · ${esc(dt(m.created))}</strong><p class="preserve">${esc(m.body)}</p>${reportBtn("message",m.id)}</article>`).join("")||empty("Commencez la conversation.")}${t.readonly?empty("Cette conversation est en lecture seule."):icebreakerHtml(t.id,ice.questions,talked)+form("message",`<input type="hidden" name="thread" value="${t.id}">${area("Votre message","body","",true)}`,"Envoyer le message")}</div></div>`;
 }
 async function notesPage(){
  const n=await api("/notifications/me");

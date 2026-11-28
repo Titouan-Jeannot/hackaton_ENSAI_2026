@@ -396,7 +396,7 @@ def test_email_confirmation_link_code_attempts_and_resend(world):
 def test_profile_diet_dropdown(world):
     h = world.host
     assert "Halal" in world.client().get("/api/catalog/options").json()["profile_diets"]
-    assert h.patch("/api/users/me", json={"diet": "Vegan"}).json()["diet"] == "Vegan"
+    assert h.patch("/api/users/me", json={"diet": "Végétalien"}).json()["diet"] == "Végétalien"
     assert h.patch("/api/users/me", json={"diet": "végé"}).status_code == 422
     assert h.patch("/api/users/me", json={"diet": ""}).json()["diet"] == ""
 
@@ -504,7 +504,9 @@ def test_suggestions_near_home(world):
     full = w.create(title="Complet", maximum=1)
     g = w.member("guest", gender="Homme")
     accepted(w, w.member("other"), full)
-    assert g.get("/api/meals/suggestions").json() == {"needs_address": True, "meals": []}
+    first = g.get("/api/meals/suggestions").json()
+    assert first["needs_address"] and not first["profile_complete"]
+    assert {m["title"] for m in first["meals"]} == {"Tout près", "Bruz", "Paris"}  # sans adresse : pas de distance
     g.patch("/api/users/me", json={"home_address": "Place de la Mairie, Rennes", "home_lat": 48.1115, "home_lng": -1.6795})
     titles = [m["title"] for m in g.get("/api/meals/suggestions").json()["meals"]]
     assert titles == ["Tout près", "Bruz"]  # triées par distance, sans repas inaccessible, complet ou lointain
@@ -543,3 +545,57 @@ def test_accepted_guests_join_meal_group_chat(world):
     assert not private["group"] and private["id"] != chat
     assert w.host.post(f"/api/meals/{m}/cancel").is_success
     assert g2.get(path).json()["readonly"]
+
+
+def test_profile_lists_are_normalized(world):
+    from sqlalchemy import text
+    h = world.host
+    r = h.patch("/api/users/me", json={"allergens": ["Lait", "Gluten", "Lait"], "languages": ["Anglais"],
+                                       "moods": ["Festive"], "activities": ["Quiz"], "allergies": "Kiwi"}).json()
+    assert r["allergens"] == ["Gluten", "Lait"] and r["moods"] == ["Festive"] and r["allergies"] == "Kiwi"
+    assert h.patch("/api/users/me", json={"allergens": ["Chocolat"]}).status_code == 422
+    assert h.patch("/api/users/me", json={"moods": ["Bruyante"]}).status_code == 422
+    m = world.create(allergens=["Lait", "Soja"], diets=["Végétarien", "Halal"], languages=["Français", "Anglais"],
+                     kind="Repas + activité", activity="Quiz", mood="Festive")
+    card = h.get(f"/api/meals/{m}").json()
+    assert card["allergens"] == ["Soja", "Lait"] and card["diets"] == ["Végétarien", "Halal"]
+    assert card["activity"] == "Quiz" and card["mood"] == "Festive"
+    with world.app.state.engine.connect() as c:
+        assert c.execute(text("select count(*) from meal_allergens where meal = :m"), {"m": m}).scalar() == 2
+        assert c.execute(text("select count(*) from user_allergens")).scalar() == 2
+        assert c.execute(text("select count(*) from allergens")).scalar() == 14
+    # Les filtres du catalogue passent par les tables de liaison.
+    assert [x["id"] for x in h.get("/api/meals?diet=Halal").json()] == [m]
+    assert m not in [x["id"] for x in h.get("/api/meals?allergen=Soja").json()]
+    assert [x["id"] for x in h.get("/api/meals?activity=Quiz&mood=Festive&language=Anglais").json()] == [m]
+
+
+def test_suggestions_follow_profile(world):
+    w = world
+    plain = w.create(title="Soupe", allergens=["Céleri"], diets=["Végétarien"])
+    nuts = w.create(title="Gâteau aux noix", allergens=["Fruits à coque"], diets=["Végétarien"])
+    unsure = w.create(title="Mystère", allergens=[], uncertain=True, diets=["Végétalien"])
+    meat = w.create(title="Bœuf bourguignon", allergens=["Sulfites"], diets=["Aucun régime particulier"])
+    games = w.create(title="Curry & jeux", allergens=["Moutarde"], diets=["Végétalien", "Halal"],
+                     kind="Repas + activité", activity="Jeux de société", mood="Conviviale")
+    g = w.member("gourmande")
+
+    def titles():
+        return [m["title"] for m in g.get("/api/meals/suggestions").json()["meals"]]
+
+    assert set(titles()) == {"Soupe", "Gâteau aux noix", "Mystère", "Bœuf bourguignon", "Curry & jeux"}
+    g.patch("/api/users/me", json={"allergens": ["Fruits à coque"]})
+    assert set(titles()) == {"Soupe", "Bœuf bourguignon", "Curry & jeux"}     # allergène et incertain écartés
+    g.patch("/api/users/me", json={"diet": "Végétarien"})
+    assert set(titles()) == {"Soupe", "Curry & jeux"}                         # régime respecté (végétalien inclus)
+    g.patch("/api/users/me", json={"diet": "Halal", "activities": ["Jeux de société"], "moods": ["Conviviale"]})
+    data = g.get("/api/meals/suggestions").json()
+    assert [m["title"] for m in data["meals"]][0] == "Curry & jeux"           # préférences : en tête
+    assert {"Halal", "Jeux de société", "Ambiance conviviale"} <= set(data["meals"][0]["reasons"])
+    g.patch("/api/users/me", json={"diet": "Sans gluten", "allergens": [], "activities": [], "moods": []})
+    assert "Mystère" not in titles()                                           # sans gluten : allergènes certains
+    g.patch("/api/users/me", json={"home_address": "Rennes", "home_lat": 48.1113, "home_lng": -1.68})
+    assert g.get("/api/meals/suggestions").json()["profile_complete"]
+    assert {plain, nuts, meat, games} >= {m["id"] for m in g.get("/api/meals/suggestions").json()["meals"]}
+    assert unsure not in [m["id"] for m in g.get("/api/meals/suggestions").json()["meals"]]
+

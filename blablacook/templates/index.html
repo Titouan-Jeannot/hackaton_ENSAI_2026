@@ -1,12 +1,18 @@
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f9f7ef"><title>BlablaCook · Repas entre étudiants</title>
-<link rel="icon" href="static/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="static/app.css">
-<script defer src="static/common.js"></script><script defer src="static/maps.js"></script><script defer src="static/meals.js"></script><script defer src="static/account.js"></script><script defer src="static/app.js"></script></head>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#fbfbfd"><title>BlablaCook · Repas entre étudiants</title>
+<meta name="description" content="Partager des repas faits maison entre étudiants vérifiés.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="static/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="static/icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="BlablaCook"><meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="stylesheet" href="static/app.css?v={{ v }}">
+<script defer src="static/common.js?v={{ v }}"></script><script defer src="static/maps.js?v={{ v }}"></script><script defer src="static/meals.js?v={{ v }}"></script><script defer src="static/account.js?v={{ v }}"></script><script defer src="static/app.js?v={{ v }}"></script></head>
 <body><a class="skip" href="#main">Aller au contenu</a>
 <header class="top"><div class="bar"><a class="brand" href="#catalogue" aria-label="BlablaCook, accueil"><img src="static/icon.svg" alt="">Blabla<span>Cook</span></a>
 <nav id="nav" aria-label="Navigation principale"></nav></div></header>
 <main id="main" tabindex="-1"><p class="loading">Chargement des tables…</p></main>
+<nav id="tabs" class="tabbar" aria-label="Navigation de l’application"></nav>
 <div id="notice" role="status" aria-live="polite"></div>
 <dialog id="dialog"><form method="dialog" class="dialog-close"><button aria-label="Fermer" class="iconbtn">×</button></form><div id="dialog-body"></div></dialog>
 <footer><div class="bar"><a class="brand small" href="#catalogue"><img src="static/icon.svg" alt="">Blabla<span>Cook</span></a><span>Repas partagés entre étudiants</span></div></footer>

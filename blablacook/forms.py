@@ -4,22 +4,22 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstrai
 
 from .imagesearch import PHOTO_TOKEN
 from .photos import local_photo
+from .reference import ACTIVITIES, ALLERGENS, LANGUAGES, MEAL_DIETS, MOODS, PROFILE_DIETS
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2400)]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
 Short = Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)]
 Stars = Annotated[int, Field(strict=True, ge=1, le=5)]
 OPTIONS = {
-    "diets": ["Aucun régime particulier", "Végétarien", "Végétalien", "Sans porc"],
-    "allergens": ["Gluten", "Crustacés", "Œufs", "Poisson", "Arachides", "Soja", "Lait", "Fruits à coque",
-                  "Céleri", "Moutarde", "Sésame", "Sulfites", "Lupin", "Mollusques"],
-    "languages": ["Français", "Anglais", "Espagnol", "Italien", "Non renseigné"],
-    "moods": ["Conviviale", "Tranquille", "Festive", "Non renseigné"],
-    "activities": ["Jeux de société", "Film", "Cuisine ensemble", "Quiz"],
+    "diets": MEAL_DIETS,
+    "allergens": ALLERGENS,
+    "languages": LANGUAGES,
+    "moods": MOODS,
+    "activities": ACTIVITIES,
     "reasons": ["Contenu inapproprié", "Comportement préoccupant", "Information erronée", "Autre"],
     "images": ["table", "pasta", "curry", "tacos"],
     "genders": ["Femme", "Homme", "Non-binaire", "Autre"],
-    "profile_diets": ["Aucun", "Végétarien", "Vegan", "Halal", "Casher", "Sans gluten", "Sans lactose", "Autre"],
+    "profile_diets": PROFILE_DIETS,
     "photos": ["", "citron", "tomate", "olive", "orange"],
 }
 Place = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
@@ -55,8 +55,12 @@ class Profile(Input):
     photo: str = ""
     public_photo: bool = False
     hidden_guest: bool = False
-    diet: Literal[("", *OPTIONS["profile_diets"])] = ""
-    allergies: Short = ""
+    diet: Literal[("", *PROFILE_DIETS)] = ""
+    allergens: list[str] = []          # allergies (liste des 14 allergènes réglementaires)
+    allergies: Short = ""              # précisions libres
+    languages: list[str] = []          # langues parlées
+    moods: list[str] = []              # ambiances préférées
+    activities: list[str] = []         # activités préférées
     age: Annotated[int, Field(strict=True, ge=1, le=120)] | None = None
     gender: Literal["", "Femme", "Homme", "Non-binaire", "Autre"] = ""
     home_address: Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] = ""
@@ -77,6 +81,14 @@ class Profile(Input):
     @classmethod
     def valid_photo(cls, value):
         return local_photo(value, OPTIONS["photos"], (192, 192))
+
+    @model_validator(mode="after")
+    def known_preferences(self):
+        for key, allowed in (("allergens", ALLERGENS), ("languages", LANGUAGES), ("moods", MOODS),
+                             ("activities", ACTIVITIES)):
+            if set(getattr(self, key)) - set(allowed):
+                raise ValueError("Sélection inconnue.")
+        return self
 
 
 class MealForm(Input):
